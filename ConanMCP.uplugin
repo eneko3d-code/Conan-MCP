@@ -1,0 +1,28 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0.0",
+	"FriendlyName": "Conan MCP",
+	"Description": "Integrated Model Context Protocol (MCP) server for Conan Exiles Enhanced DevKit (Unreal Engine 5.8.2). Enables external AI agents to securely inspect and control the editor.",
+	"Category": "Developer Tools",
+	"CreatedBy": "Eneko3D (Created with Google Antigravity)",
+	"CreatedByURL": "https://github.com/eneko3d-code/Conan-MCP",
+	"DocsURL": "docs/installation.md",
+	"MarketplaceURL": "",
+	"SupportURL": "https://github.com/eneko3d-code/Conan-MCP/issues",
+	"CanContainContent": true,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": false,
+	"Installed": false,
+	"EnabledByDefault": true,
+	"Plugins": [
+		{
+			"Name": "Niagara",
+			"Enabled": true
+		},
+		{
+			"Name": "PythonScriptPlugin",
+			"Enabled": true
+		}
+	]
+}

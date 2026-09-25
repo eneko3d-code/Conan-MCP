@@ -1,0 +1,27 @@
+# Visual Studio / IDE
+.vs/
+*.sln
+*.suo
+*.user
+*.userprefs
+*.VC.db
+*.opendb
+
+# Unreal Engine build artifacts
+Binaries/
+Intermediate/
+DerivedDataCache/
+Saved/
+Build/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyd
+
+# OS files
+.DS_Store
+Thumbs.db
+*.tmp
+*.log

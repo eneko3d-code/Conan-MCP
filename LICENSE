@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2026 eneko3d-code
+Copyright (c) 2026 Eneko3D
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,10 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+---
+
+### Disclaimer & EULA Notice
+This project is an independent developer plugin designed for Unreal Engine and the Conan Exiles DevKit.
+It contains NO proprietary game content, copyright 3D assets, textures, sounds, or confidential binaries belonging to Funcom Oslo AS or Epic Games.
+Use of the DevKit is subject to Funcom's Conan Exiles Modding EULA and Terms of Service.
