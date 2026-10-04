@@ -14,7 +14,7 @@
 
 **The ultimate bridge connecting modern AI Agents (Google Antigravity, Cursor, Claude Code) directly to the Conan Exiles Enhanced DevKit editor.**
 
-[Installation](#-step-by-step-installation) • [Tool Catalog (38)](#-mcp-tool-catalog-38-tools) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
+[Installation](#-step-by-step-installation) • [Tool Catalog (46)](#-mcp-tool-catalog-46-tools) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
 
 </div>
 
@@ -36,7 +36,7 @@ It empowers external AI coding assistants and autonomous agents to:
 1. **Live Editor Inspection:** Inspect actors, levels, Blueprints, DataTables, skeletal meshes, and bone/socket hierarchies in real time.
 2. **Automated Blueprint Authoring:** Dynamically create, wire, compile, and validate Blueprint function graphs and node networks.
 3. **Conan Exiles Catalog Indexing:** Query the `AssetRegistry` with high performance (over 1,022 indexed Niagara/Cascade VFX, items, thralls, and weapons).
-4. **Safe Game-Thread Execution:** Execute synchronized Python routines with full Undo/Redo (`FScopedTransaction`) transaction safety.
+4. **Safe Game-Thread Execution:** All tools run on the Game Thread; `SAFE_WRITE` tools record Undo/Redo transactions.
 
 ---
 
@@ -84,6 +84,17 @@ Upon editor startup, the startup script (`Content/Python/init_unreal.py`) automa
 http://127.0.0.1:8123/mcp
 ```
 
+### Security configuration (environment variables)
+| Variable | Default | Purpose |
+|---|---|---|
+| `CONAN_MCP_TOKEN` | *(empty)* | If set, every request must send `Authorization: Bearer <token>`. **Recommended.** |
+| `CONAN_MCP_READONLY` | `0` | `1` disables all `SAFE_WRITE` tools. |
+| `CONAN_MCP_ENABLE_DESTRUCTIVE` | `0` | `1` enables `DESTRUCTIVE` tools such as `execute_python`. |
+| `CONAN_MCP_HOST` / `CONAN_MCP_PORT` | `127.0.0.1` / `8123` | Bind address and port. |
+| `CONAN_MCP_TIMEOUT` | `30` | Seconds a tool may wait for the Game Thread. |
+
+Requests carrying a non-loopback `Origin` or `Host` header are rejected (protects against malicious web pages and DNS rebinding), and package paths must live under `/Game`, `/Engine` or `/ConanSandbox`.
+
 ### Verify Server Status
 Open PowerShell and run:
 ```powershell
@@ -93,7 +104,7 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
   "registered_tools": 46,
@@ -159,7 +170,7 @@ Add to your agent or workspace MCP configuration:
 | **DataTables** | `find_datatable`, `get_datatable_info`, `list_datatable_rows`, `get_datatable_row` | `READ_ONLY` | Inspect Conan DataTables, paginated row dumping, and row data in clean JSON format. |
 | **Particles** | `find_particle_systems`, `get_particle_info`, `get_character_sockets`, `preview_particle_on_actor`, `remove_preview_particle` | `READ_ONLY` / `SAFE_WRITE` | Index Niagara & Cascade systems, inspect parameters, and preview particles on actor sockets. |
 | **Conan Exiles** | `find_conan_assets`, `find_conan_datatables`, `find_conan_characters`, `find_conan_items`, `find_conan_particles` | `READ_ONLY` | Domain-specific tools optimized for Conan items, recipes, thralls, weapons, and VFX. |
-| **Scripting** | `execute_python` | `SAFE_WRITE` | Execute arbitrary Python routines safely on the Game Thread with Undo/Redo transaction support. |
+| **Scripting** | `execute_python` | `DESTRUCTIVE` | Execute arbitrary Python on the Game Thread. **Disabled by default** — opt in with `CONAN_MCP_ENABLE_DESTRUCTIVE=1`. |
 
 ---
 
@@ -193,7 +204,7 @@ graph TD
     subgraph "Conan Exiles DevKit (UE 5.8.2 / Port 8123)"
         HTTP["HTTP / JSON-RPC 2.0 Server (/mcp)"]
         AUTH["Security & Request Validation"]
-        REG["Tool Registry (38 Registered Tools)"]
+        REG["Tool Registry (46 Registered Tools)"]
         
         subgraph "Execution Toolsets"
             ED[Editor Tools]
@@ -225,7 +236,8 @@ graph TD
 ConanMCP has been rigorously tested in live production sessions with the DevKit open:
 - **Low-Latency Operations:** Response times < 15ms for local tool queries.
 - **Transactional Safety:** All `SAFE_WRITE` operations create undo history records compatible with `Ctrl+Z`.
-- **Anti-Hang Protection:** Automated 30-second execution watchdog guards against blocking calls freezing the editor.
+- **Anti-Hang Protection:** Configurable execution watchdog (`CONAN_MCP_TIMEOUT`, default 30 s); timed-out tasks are cancelled instead of running late.
+- **Automated Tests:** `python -m pytest tests` covers the JSON-RPC engine, security policy, and HTTP/SSE transport (no Unreal needed).
 
 ---
 

@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 1,
-	"VersionName": "1.0.0",
+	"Version": 2,
+	"VersionName": "1.1.1",
 	"FriendlyName": "Conan MCP",
 	"Description": "Integrated Model Context Protocol (MCP) server for Conan Exiles Enhanced DevKit (Unreal Engine 5.8.2). Enables external AI agents to securely inspect and control the editor.",
 	"Category": "Developer Tools",
