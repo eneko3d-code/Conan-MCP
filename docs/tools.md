@@ -1,6 +1,6 @@
 # Catálogo Completo de Herramientas: ConanMCP
 
-El plugin **ConanMCP** expone un catálogo de **38 herramientas** agrupadas en 8 dominios funcionales. Cada herramienta define su esquema JSON Schema para validación de argumentos y su clasificación de seguridad.
+El plugin **ConanMCP** expone un catálogo de **46 herramientas** agrupadas en 8 dominios funcionales. Cada herramienta define su esquema JSON Schema para validación de argumentos y su clasificación de seguridad.
 
 ---
 
@@ -635,7 +635,7 @@ El plugin **ConanMCP** expone un catálogo de **38 herramientas** agrupadas en 8
 
 ### `execute_python`
 - **Categoría:** Scripting
-- **Seguridad:** `SAFE_WRITE`
+- **Seguridad:** `DESTRUCTIVE` (desactivada por defecto; requiere `CONAN_MCP_ENABLE_DESTRUCTIVE=1`)
 - **Descripción:** Ejecuta código Python arbitrario de forma síncrona en el Game Thread de Unreal Engine, capturando `stdout`, `stderr` y resultados evaluados.
 - **Esquema de Entrada:**
   ```json

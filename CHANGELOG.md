@@ -10,6 +10,11 @@
 - SSE transport now follows the 2024-11-05 spec: `POST /messages?sessionId=` returns `202` and the reply is delivered on the SSE stream.
 - Game Thread timeout unified at 30 s (`CONAN_MCP_TIMEOUT`); timed-out tasks are cancelled instead of running later.
 - Thread-safe request/error counters; `init_unreal.py` honours `CONAN_MCP_HOST` / `CONAN_MCP_PORT`.
+### Quality
+- Tool arguments are now validated against each tool's `inputSchema` (required, type, enum, min/max) before execution.
+- `tools/list` exposes MCP `annotations` (`readOnlyHint`, `destructiveHint`, ...).
+- Hot reload (`reload_server`, `conan/reload`) shares one implementation and preserves SSE sessions, queue, counters and ticker.
+- Docs aligned to 46 tools / version 1.1.1.
 ### Other
 - The native C++ server no longer auto-starts by default (it shared port 8123 with the Python server).
 - Added `pytest` suite (`tests/`) and GitHub Actions CI.

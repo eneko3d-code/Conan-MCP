@@ -9,7 +9,7 @@ Este documento describe la suite de pruebas automatizadas, las pruebas manuales 
 El sistema de pruebas de ConanMCP valida cuatro capas críticas:
 1. **Conectividad y Red:** Arranque del servidor HTTP en `127.0.0.1:8123`, respuestas a peticiones GET de estado y manejo de sockets.
 2. **Cumplimiento del Protocolo MCP (2024-11-05):** Verificación del handshake de inicialización, notificaciones, `ping`, listado de herramientas (`tools/list`) y ejecución (`tools/call`).
-3. **Validación del Catálogo de Herramientas:** Verificación de la presencia, esquemas JSON y funcionalidad de las **38 herramientas**.
+3. **Validación del Catálogo de Herramientas:** Verificación de la presencia, esquemas JSON y funcionalidad de las **46 herramientas**.
 4. **Manejo de Errores y Robustez:** Validación de respuestas JSON-RPC 2.0 ante métodos desconocidos (`-32601`), herramientas no existentes y ciclo de vida de reinicio del servidor.
 
 ---
@@ -35,7 +35,7 @@ Se recomienda ejecutar la suite con el propio intérprete de Python 3.11 distrib
 | **03** | `initialize` | Handshake inicial de protocolo MCP con capacidades y datos de versión. | ✅ PASSED |
 | **04** | `notifications/initialized` | Confirmación asíncrona de inicialización enviada por el cliente. | ✅ PASSED |
 | **05** | `ping` | Verificación de latencia y estado activo mediante método estándar MCP. | ✅ PASSED |
-| **06** | `tools/list` | Recuperación y validación del esquema de las 38 herramientas requeridas. | ✅ PASSED |
+| **06** | `tools/list` | Recuperación y validación del esquema de las 46 herramientas requeridas. | ✅ PASSED |
 | **07** | `tools/call (get_editor_status)` | Ejecución de consulta de estado del motor y DevKit. | ✅ PASSED |
 | **08** | `tools/call (get_selected_actors)` | Ejecución de consulta de selección de actores en la escena. | ✅ PASSED |
 | **09** | `Error -32601 (Invalid Method)` | Comprobación de respuesta correcta ante RPC inexistente. | ✅ PASSED |
@@ -48,10 +48,10 @@ Se recomienda ejecutar la suite con el propio intérprete de Python 3.11 distrib
 ConanMCP Automated Protocol & Tool Verification Test
 ============================================================
 [1] Starting ConanMCP server on 127.0.0.1:8123...
-[ConanMCP] Registered 38 tools for ConanMCP
+[ConanMCP] Registered 46 tools for ConanMCP
 [ConanMCP] MCP server started on 127.0.0.1:8123 (Endpoint: /mcp)
 [2] Testing HTTP GET endpoint...
-    GET Response: {'service': 'ConanMCP', 'version': '1.0.0', 'protocol': 'MCP / JSON-RPC 2.0', 'status': 'running', 'registered_tools': 38}
+    GET Response: {'service': 'ConanMCP', 'version': '1.1.1', 'protocol': 'MCP / JSON-RPC 2.0 (2024-11-05)', 'status': 'running', 'registered_tools': 46}
     PASSED: GET endpoint
 [3] Testing 'initialize'...
     initialize Response: {
@@ -77,8 +77,8 @@ ConanMCP Automated Protocol & Tool Verification Test
 [5] Testing 'ping'...
     PASSED: ping
 [6] Testing 'tools/list'...
-    Total registered tools: 38
-    All 38 required tools verified in tools/list schema!
+    Total registered tools: 46
+    All 46 required tools verified in tools/list schema!
     PASSED: tools/list
 [7] Testing tools/call 'get_editor_status'...
 [ConanMCP] Tool called: get_editor_status
@@ -98,7 +98,7 @@ ConanMCP Automated Protocol & Tool Verification Test
 [11] Testing server Stop and Restart...
 [ConanMCP] MCP server stopped
     Server stopped successfully (connection refused as expected)
-[ConanMCP] Registered 38 tools for ConanMCP
+[ConanMCP] Registered 46 tools for ConanMCP
 [ConanMCP] MCP server started on 127.0.0.1:8123 (Endpoint: /mcp)
     Server restarted and responding successfully!
 [ConanMCP] MCP server stopped
@@ -119,7 +119,7 @@ Cuando el Conan Exiles DevKit esté ejecutándose en vivo, puedes realizar las s
 En la pestaña **Output Log** de Unreal Engine, busca las líneas con categoría `LogConanMCP`:
 ```
 LogConanMCP: Starting ConanMCP auto-initializer...
-LogConanMCP: Registered 38 tools for ConanMCP
+LogConanMCP: Registered 46 tools for ConanMCP
 LogConanMCP: MCP server started on 127.0.0.1:8123 (Endpoint: /mcp)
 ```
 

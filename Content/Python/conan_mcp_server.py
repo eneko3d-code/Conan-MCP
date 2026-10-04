@@ -60,11 +60,13 @@ SAFE_WRITE = "SAFE_WRITE"
 DESTRUCTIVE = "DESTRUCTIVE"
 
 # Telemetry & Diagnostics Counters
-_server_start_time = time.time()
-_request_counter = 0
-_error_counter = 0
-_counter_lock = threading.Lock()
-_recent_logs_buffer = collections.deque(maxlen=200)
+# importlib.reload() re-executes this module in the same namespace, so runtime state
+# is carried over via globals().get(...) instead of being reset by a hot reload.
+_server_start_time = globals().get("_server_start_time", time.time())
+_request_counter = globals().get("_request_counter", 0)
+_error_counter = globals().get("_error_counter", 0)
+_counter_lock = globals().get("_counter_lock", threading.Lock())
+_recent_logs_buffer = globals().get("_recent_logs_buffer", collections.deque(maxlen=200))
 
 
 def _count_request():
@@ -94,10 +96,49 @@ def validate_package_path(value: str, arg_name: str = "path") -> None:
 _PATH_ARG_NAMES = ("package_path", "asset_path", "path")
 
 
-def validate_tool_arguments(args: Any) -> None:
-    """Validates every path-like argument of a tool call before it reaches the engine."""
+_JSON_TYPES = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def validate_against_schema(args: dict, schema: Optional[dict]) -> None:
+    """Minimal JSON-Schema check: required fields, primitive types, enum, min/max."""
+    if not schema:
+        return
+    props = schema.get("properties", {})
+    for name in schema.get("required", []):
+        if name not in args or args[name] is None:
+            raise ValueError(f"Missing required argument '{name}'")
+    for name, value in args.items():
+        spec = props.get(name)
+        if not spec or value is None:
+            continue
+        expected = spec.get("type")
+        if expected in _JSON_TYPES:
+            ok = isinstance(value, _JSON_TYPES[expected])
+            if expected in ("integer", "number") and isinstance(value, bool):
+                ok = False  # bool is an int subclass in Python
+            if not ok:
+                raise ValueError(f"Argument '{name}' must be of type {expected}")
+        if "enum" in spec and value not in spec["enum"]:
+            raise ValueError(f"Argument '{name}' must be one of {spec['enum']}")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in spec and value < spec["minimum"]:
+                raise ValueError(f"Argument '{name}' must be >= {spec['minimum']}")
+            if "maximum" in spec and value > spec["maximum"]:
+                raise ValueError(f"Argument '{name}' must be <= {spec['maximum']}")
+
+
+def validate_tool_arguments(args: Any, schema: Optional[dict] = None) -> None:
+    """Validates a tool call's arguments (schema + path-like values) before it reaches the engine."""
     if not isinstance(args, dict):
         raise ValueError("'arguments' must be a JSON object")
+    validate_against_schema(args, schema)
     for key in _PATH_ARG_NAMES:
         if key in args:
             validate_package_path(str(args[key]).strip(), key)
@@ -145,7 +186,7 @@ class SSESessionManager:
                 except queue.Full:
                     pass
 
-sse_manager = SSESessionManager()
+sse_manager = globals().get("sse_manager") or SSESessionManager()
 
 
 def _append_log(level: str, msg: str):
@@ -187,9 +228,9 @@ def log_error(msg: str):
 # We register an engine ticker callback that drains tasks queued by the HTTP worker thread.
 # =============================================================================
 
-_game_thread_queue = queue.Queue()
-_ticker_handle = None
-_ticker_lock = threading.Lock()
+_game_thread_queue = globals().get("_game_thread_queue") or queue.Queue()
+_ticker_handle = globals().get("_ticker_handle")
+_ticker_lock = globals().get("_ticker_lock") or threading.Lock()
 
 def _game_thread_ticker(delta_time: float) -> bool:
     """Processes queued tasks on the Unreal Engine Game Thread."""
@@ -281,7 +322,13 @@ class ToolRegistry:
             result.append({
                 "name": t["name"],
                 "description": t["description"],
-                "inputSchema": t["inputSchema"]
+                "inputSchema": t["inputSchema"],
+                "annotations": {
+                    "readOnlyHint": t["security"] == READ_ONLY,
+                    "destructiveHint": t["security"] == DESTRUCTIVE,
+                    "idempotentHint": t["security"] == READ_ONLY,
+                    "openWorldHint": False
+                }
             })
         return result
 
@@ -1319,21 +1366,24 @@ def tool_get_mcp_diagnostics(args):
         "engine_active": unreal is not None
     }
 
-def tool_reload_server(args):
+def reload_server_module() -> dict:
+    """Hot-reloads this module and re-registers tools/resources/prompts (state is preserved)."""
     import importlib
-    import conan_mcp_server
-    importlib.reload(conan_mcp_server)
-    conan_mcp_server.register_all_tools()
-    conan_mcp_server.register_all_resources()
-    conan_mcp_server.register_all_prompts()
-    conan_mcp_server.ensure_ticker_registered()
-    sse_manager.broadcast_notification("notifications/tools/list_changed", {})
+    module = importlib.reload(sys.modules[__name__])
+    module.register_all_tools()
+    module.register_all_resources()
+    module.register_all_prompts()
+    module.ensure_ticker_registered()
+    module.sse_manager.broadcast_notification("notifications/tools/list_changed", {})
     return {
         "reloaded": True,
-        "tools_count": len(conan_mcp_server.registry.tools),
-        "resources_count": len(conan_mcp_server.resource_registry.resources),
-        "prompts_count": len(conan_mcp_server.prompt_registry.prompts)
+        "tools_count": len(module.registry.tools),
+        "resources_count": len(module.resource_registry.resources),
+        "prompts_count": len(module.prompt_registry.prompts)
     }
+
+def tool_reload_server(args):
+    return reload_server_module()
 
 
 # =============================================================================
@@ -1991,24 +2041,10 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
 
     # Management
     elif method == "conan/reload":
-        import importlib
-        import conan_mcp_server
-        importlib.reload(conan_mcp_server)
-        conan_mcp_server.register_all_tools()
-        conan_mcp_server.register_all_resources()
-        conan_mcp_server.register_all_prompts()
-        conan_mcp_server.ensure_ticker_registered()
-        sse_manager.broadcast_notification("notifications/tools/list_changed", {})
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "reloaded": True,
-                "tools_count": len(conan_mcp_server.registry.tools),
-                "resources_count": len(conan_mcp_server.resource_registry.resources),
-                "prompts_count": len(conan_mcp_server.prompt_registry.prompts)
-            }
-        }
+        if not ENABLE_WRITE_TOOLS:
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": "Security error: reload requires SAFE_WRITE tools"}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": execute_on_game_thread(reload_server_module)}
 
     # Tools
     elif method == "tools/list":
@@ -2057,7 +2093,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
         log_info(f"Tool called: {tool_name}")
 
         try:
-            validate_tool_arguments(tool_args)
+            validate_tool_arguments(tool_args, tool_def.get("inputSchema"))
             result_data = execute_on_game_thread(tool_def["handler"], tool_args)
             elapsed_ms = (time.time() - start_t) * 1000.0
             log_info(f"Tool completed in {elapsed_ms:.1f} ms")
@@ -2204,7 +2240,7 @@ def process_json_rpc(raw_json: str) -> Optional[str]:
 # HTTP & SSE REQUEST HANDLER
 # =============================================================================
 
-_server_running = True
+_server_running = globals().get("_server_running", True)
 
 class ConanMCPRequestHandler(BaseHTTPRequestHandler):
     def handle(self):
@@ -2453,7 +2489,7 @@ class ConanMCPServerThread(threading.Thread):
             log_info("MCP server stopped")
 
 
-_server_instance: Optional[ConanMCPServerThread] = None
+_server_instance: Optional[ConanMCPServerThread] = globals().get("_server_instance")
 
 def start_server(host=BIND_ADDRESS, port=DEFAULT_PORT):
     global _server_instance

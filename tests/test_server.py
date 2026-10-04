@@ -203,3 +203,41 @@ def test_sse_transport_replies_over_stream(http_server):
                 break
     finally:
         stream.close()
+
+
+# --- Schema validation, annotations, reload ---------------------------------
+
+def test_missing_required_argument_is_rejected():
+    res = rpc("tools/call", {"name": "get_asset_info", "arguments": {}})["result"]
+    assert res["isError"] is True and "asset_path" in res["content"][0]["text"]
+
+
+def test_wrong_argument_type_is_rejected():
+    res = rpc("tools/call", {"name": "find_assets", "arguments": {"limit": "ten"}})["result"]
+    assert res["isError"] is True and "limit" in res["content"][0]["text"]
+
+
+def test_schema_validator_enum_range_and_bool():
+    schema = {"properties": {"n": {"type": "integer", "minimum": 1, "maximum": 5},
+                             "k": {"type": "string", "enum": ["a", "b"]}}}
+    srv.validate_against_schema({"n": 3, "k": "a"}, schema)
+    for bad in ({"n": 0}, {"n": 6}, {"n": True}, {"k": "z"}):
+        with pytest.raises(ValueError):
+            srv.validate_against_schema(bad, schema)
+
+
+def test_tool_annotations_reflect_security_level():
+    tools = {t["name"]: t for t in rpc("tools/list")["result"]["tools"]}
+    assert tools["get_editor_status"]["annotations"]["readOnlyHint"] is True
+    assert tools["set_actor_transform"]["annotations"]["readOnlyHint"] is False
+    assert tools["execute_python"]["annotations"]["destructiveHint"] is True
+
+
+def test_reload_preserves_runtime_state():
+    sessions_before, queue_before = srv.sse_manager, srv._game_thread_queue
+    started_before = srv._server_start_time
+    result = srv.reload_server_module()
+    assert result["reloaded"] is True and result["tools_count"] >= 46
+    assert srv.sse_manager is sessions_before
+    assert srv._game_thread_queue is queue_before
+    assert srv._server_start_time == started_before
