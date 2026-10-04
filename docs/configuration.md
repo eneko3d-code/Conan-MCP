@@ -12,7 +12,9 @@ Por defecto, ConanMCP se enlaza a la interfaz loopback local para garantizar la 
 |---|---|---|
 | **Host / Bind Address** | `127.0.0.1` | Dirección IP de escucha del servidor. Por seguridad, no debe exponerse a interfaces públicas (`0.0.0.0`) sin mecanismos adicionales de cifrado y autenticación. |
 | **Port** | `8123` | Puerto TCP en el que escucha el endpoint HTTP. |
-| **Endpoint Path** | `/mcp` | Ruta del endpoint HTTP donde se procesan las peticiones JSON-RPC 2.0 y el handshake GET. |
+| **Endpoint Path (HTTP)** | `/mcp` | Ruta del endpoint HTTP donde se procesan las peticiones JSON-RPC 2.0 y el handshake GET. |
+| **Endpoint SSE** | `/sse` | Ruta para suscripción Server-Sent Events (estándar oficial MCP). |
+| **Endpoint Messages** | `/messages` | Ruta para peticiones POST asociadas a sesiones SSE activas. |
 
 ---
 
@@ -25,6 +27,7 @@ Para prevenir sobrecarga de memoria en proyectos con cientos de miles de assets 
 BIND_ADDRESS = "127.0.0.1"
 DEFAULT_PORT = 8123
 ENDPOINT_PATH = "/mcp"
+CONAN_MCP_TOKEN = os.environ.get("CONAN_MCP_TOKEN", "")
 
 # Banderas de control de operaciones
 ENABLE_WRITE_TOOLS = True          # Permite herramientas de tipo SAFE_WRITE (con transacciones Undo)
@@ -33,14 +36,18 @@ ENABLE_LOGGING = True              # Registra las llamadas en el Output Log de U
 MAX_RESULTS = 50                   # Límite por defecto para consultas AssetRegistry y actores
 ```
 
-### Explicación de Banderas de Seguridad:
-1. `ENABLE_WRITE_TOOLS` (por defecto `True`):
+### Explicación de Mecanismos de Seguridad:
+1. **Validación Anti-DNS Rebinding (Cabecera `Host`):**
+   - El servidor rechaza con código HTTP 403 cualquier petición cuya cabecera `Host` no sea `127.0.0.1`, `localhost` o `[::1]`. Esto neutraliza ataques de robo de sesión o ejecución remota desde páginas web que intenten cruzar localhost.
+2. **Autenticación por Bearer Token (Opcional):**
+   - Si se define la variable `CONAN_MCP_TOKEN`, toda petición HTTP o SSE debe incluir la cabecera `Authorization: Bearer <TOKEN>`.
+3. `ENABLE_WRITE_TOOLS` (por defecto `True`):
    - Cuando está activo, permite herramientas como `set_actor_transform`, `save_current_level`, `preview_particle_on_actor` y `remove_preview_particle`.
-   - Si se cambia a `False`, el servidor responderá con código de error JSON-RPC `-32001 (Security Error)` a cualquier intento de modificación, comportándose estrictamente en modo solo lectura.
-2. `ENABLE_DESTRUCTIVE_TOOLS` (por defecto `False`):
+   - Si se cambia a `False`, el servidor responderá con `isError: true` a cualquier intento de modificación, comportándose estrictamente en modo solo lectura.
+4. `ENABLE_DESTRUCTIVE_TOOLS` (por defecto `False`):
    - Protege los activos del proyecto contra eliminaciones masivas o irreparables. Ninguna IA externa puede destruir assets salvo que el desarrollador cambie explícitamente este valor.
-3. `MAX_RESULTS` (por defecto `50`):
-   - Evita que consultas globales sobre `/Game/` devuelvan 100,000 registros de golpe, lo que causaría bloqueos o respuestas HTTP de cientos de megabytes.
+5. `MAX_RESULTS` / Paginación (`offset` / `limit`):
+   - Evita que consultas globales sobre `/Game/` devuelvan decenas de miles de registros de golpe. Se soporta paginación limpia con `offset`, `limit` y `has_more`.
 
 ---
 
@@ -50,6 +57,7 @@ Puedes sobreescribir la configuración sin tocar el código asignando variables 
 
 - `CONAN_MCP_PORT`: Define un puerto alternativo (ej. `8125`).
 - `CONAN_MCP_HOST`: Define la dirección de escucha (ej. `127.0.0.1`).
+- `CONAN_MCP_TOKEN`: Define un token secreto de autorización Bearer.
 - `CONAN_MCP_READONLY`: Si se define como `1`, desactiva automáticamente las herramientas de escritura.
 
 ---

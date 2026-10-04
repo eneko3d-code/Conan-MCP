@@ -93,10 +93,14 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "1.0.0",
-  "protocol": "MCP / JSON-RPC 2.0",
+  "version": "1.1.0",
+  "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
-  "registered_tools": 38
+  "registered_tools": 46,
+  "registered_resources": 4,
+  "registered_prompts": 4,
+  "sse_endpoint": "/sse",
+  "messages_endpoint": "/messages"
 }
 ```
 
@@ -110,7 +114,7 @@ Add to your agent or workspace MCP configuration:
 {
   "mcpServers": {
     "conan-devkit": {
-      "url": "http://127.0.0.1:8123/mcp"
+      "url": "http://127.0.0.1:8123/sse"
     }
   }
 }
@@ -121,18 +125,21 @@ Add to your agent or workspace MCP configuration:
 {
   "mcpServers": {
     "conan-mcp": {
-      "url": "http://127.0.0.1:8123/mcp"
+      "url": "http://127.0.0.1:8123/sse"
     }
   }
 }
 ```
 
-### 3. Claude Code
+### 3. Claude Desktop / Claude Code
 ```json
 {
   "mcpServers": {
     "conan-devkit": {
-      "url": "http://127.0.0.1:8123/mcp"
+      "command": "python",
+      "args": [
+        "C:\\Program Files\\Epic Games\\CEUE5Devkit\\UE4\Plugins\\ConanMCP\\docs\\mcp_stdio_bridge.py"
+      ]
     }
   }
 }
@@ -140,18 +147,36 @@ Add to your agent or workspace MCP configuration:
 
 ---
 
-## 🛠️ MCP Tool Catalog (38 Tools)
+## 🛠️ MCP Tool Catalog (46 Tools)
 
 | Category | Tools | Access Level | Description |
 |---|---|---|---|
-| **Editor** | `get_editor_status`, `get_current_level`, `save_current_level`, `get_selected_actors` | `READ_ONLY` / `SAFE_WRITE` | Engine status, active level, transactional saving, and selected actor retrieval. |
+| **Editor** | `get_editor_status`, `get_current_level`, `save_current_level`, `get_selected_actors`, `get_mcp_diagnostics`, `reload_server` | `READ_ONLY` / `SAFE_WRITE` | Engine status, active level, transactional saving, selected actors, MCP telemetry, and hot reload. |
 | **Actors** | `list_level_actors`, `find_actor`, `get_actor_info`, `get_actor_transform`, `set_actor_transform`, `get_actor_components` | `READ_ONLY` / `SAFE_WRITE` | Enumerate, search, inspect, and safely transform world actors and their components. |
-| **Assets** | `find_assets`, `get_asset_info`, `get_asset_class`, `get_asset_path`, `get_asset_dependencies`, `save_asset` | `READ_ONLY` / `SAFE_WRITE` | High-efficiency AssetRegistry queries with pagination, dependency tracing, and asset saving. |
+| **Assets** | `find_assets`, `get_asset_info`, `get_asset_class`, `get_asset_path`, `get_asset_dependencies`, `save_asset`, `create_blueprint`, `create_widget_blueprint`, `create_struct`, `create_enum`, `create_datatable` | `READ_ONLY` / `SAFE_WRITE` | High-efficiency AssetRegistry queries with pagination, dependency tracing, asset creation, and saving. |
 | **Skeletons** | `get_skeletal_mesh_info`, `get_skeleton_info`, `get_skeleton_sockets`, `get_bones` | `READ_ONLY` | Inspect skeletal meshes, bone counts, socket attachments, and bone hierarchies. |
 | **Blueprints** | `find_blueprint`, `get_blueprint_info`, `get_blueprint_parent_class`, `get_blueprint_variables` | `READ_ONLY` | Deep Blueprint inspection, member variables, types, graph nodes, and parent classes. |
 | **DataTables** | `find_datatable`, `get_datatable_info`, `list_datatable_rows`, `get_datatable_row` | `READ_ONLY` | Inspect Conan DataTables, paginated row dumping, and row data in clean JSON format. |
 | **Particles** | `find_particle_systems`, `get_particle_info`, `get_character_sockets`, `preview_particle_on_actor`, `remove_preview_particle` | `READ_ONLY` / `SAFE_WRITE` | Index Niagara & Cascade systems, inspect parameters, and preview particles on actor sockets. |
 | **Conan Exiles** | `find_conan_assets`, `find_conan_datatables`, `find_conan_characters`, `find_conan_items`, `find_conan_particles` | `READ_ONLY` | Domain-specific tools optimized for Conan items, recipes, thralls, weapons, and VFX. |
+| **Scripting** | `execute_python` | `SAFE_WRITE` | Execute arbitrary Python routines safely on the Game Thread with Undo/Redo transaction support. |
+
+---
+
+## 📦 MCP Resources & Prompts
+
+### Resources (`resources/read`)
+- `devkit://status`: Real-time editor status, level path, dirty status, actor count, and memory metrics.
+- `devkit://logs/recent`: Live ring buffer of the latest Output Log messages recorded by ConanMCP.
+- `devkit://outliner`: Level actor tree with class, label, and visibility.
+- `conan://tables`: High-level inventory of all Conan Exiles gameplay, item, and spawn DataTables.
+- `conan://asset/{package_path}`: Resource Template for inspecting asset metadata and dependencies by URI.
+
+### Prompts (`prompts/get`)
+- `create-conan-item-mod`: Interactive walkthrough to author and wire a custom weapon or armor mod.
+- `audit-level-performance`: Audit active level actor density, light counts, and particle previews.
+- `inspect-character-skeleton`: Audit character sockets, bones, and attach points for thralls.
+- `debug-niagara-vfx`: Locate, diagnose, and preview particle systems on actor sockets.
 
 ---
 

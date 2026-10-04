@@ -1,19 +1,22 @@
 """
 ConanMCP - Embedded MCP (Model Context Protocol) Server for Conan Exiles Enhanced DevKit (UE 5.8.2)
-Implements JSON-RPC 2.0 over HTTP on 127.0.0.1:8123/mcp
+Implements Model Context Protocol (Spec 2024-11-05) & JSON-RPC 2.0
+Supports HTTP POST (/mcp), Server-Sent Events (/sse, /messages), and STDIO bridges.
 """
 
 import sys
+import os
 import json
 import time
 import socket
 import threading
 import queue
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from typing import Dict, Any, List, Optional
+import uuid
+import collections
+from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
+from typing import Dict, Any, List, Optional, Union
 
 # Add Vanilla Unreal Toolsets to sys.path
-import os
 for _tp in [
     r"C:\Program Files\Epic Games\CEUE5Devkit\Engine\Plugins\Experimental\ToolsetRegistry\Content\Python",
     r"C:\Program Files\Epic Games\CEUE5Devkit\Engine\Plugins\Experimental\Toolsets\EditorToolset\Content\Python",
@@ -28,12 +31,13 @@ except ImportError:
     unreal = None
 
 # Default configuration
-BIND_ADDRESS = "127.0.0.1"
-DEFAULT_PORT = 8123
+BIND_ADDRESS = os.environ.get("CONAN_MCP_HOST", "127.0.0.1")
+DEFAULT_PORT = int(os.environ.get("CONAN_MCP_PORT", 8123))
 ENDPOINT_PATH = "/mcp"
+CONAN_MCP_TOKEN = os.environ.get("CONAN_MCP_TOKEN", "")
 
 # Security flags
-ENABLE_WRITE_TOOLS = True
+ENABLE_WRITE_TOOLS = os.environ.get("CONAN_MCP_READONLY", "0") != "1"
 ENABLE_DESTRUCTIVE_TOOLS = False
 ENABLE_LOGGING = True
 MAX_RESULTS = 50
@@ -43,7 +47,66 @@ READ_ONLY = "READ_ONLY"
 SAFE_WRITE = "SAFE_WRITE"
 DESTRUCTIVE = "DESTRUCTIVE"
 
+# Telemetry & Diagnostics Counters
+_server_start_time = time.time()
+_request_counter = 0
+_error_counter = 0
+_recent_logs_buffer = collections.deque(maxlen=200)
+
+
+# =============================================================================
+# SSE SESSION MANAGER
+# Manages active Server-Sent Events (SSE) connections for bidirectional notifications
+# =============================================================================
+
+class SSESessionManager:
+    def __init__(self):
+        self.sessions: Dict[str, queue.Queue] = {}
+        self.lock = threading.Lock()
+
+    def create_session(self) -> str:
+        session_id = str(uuid.uuid4())
+        with self.lock:
+            self.sessions[session_id] = queue.Queue(maxsize=100)
+        return session_id
+
+    def remove_session(self, session_id: str):
+        with self.lock:
+            if session_id in self.sessions:
+                del self.sessions[session_id]
+
+    def broadcast_notification(self, method: str, params: dict):
+        msg = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
+        with self.lock:
+            for sid, q in list(self.sessions.items()):
+                try:
+                    q.put_nowait(msg)
+                except queue.Full:
+                    pass
+
+    def send_to_session(self, session_id: str, message: str):
+        with self.lock:
+            if session_id in self.sessions:
+                try:
+                    self.sessions[session_id].put_nowait(message)
+                except queue.Full:
+                    pass
+
+sse_manager = SSESessionManager()
+
+
+def _append_log(level: str, msg: str):
+    timestamp = time.strftime("%H:%M:%S")
+    entry = f"[{timestamp}][{level.upper()}] {msg}"
+    _recent_logs_buffer.append(entry)
+    sse_manager.broadcast_notification("notifications/message", {
+        "level": level.lower(),
+        "logger": "LogConanMCP",
+        "data": msg
+    })
+
 def log_info(msg: str):
+    _append_log("info", msg)
     if ENABLE_LOGGING:
         if unreal:
             unreal.log(f"LogConanMCP: {msg}")
@@ -51,12 +114,14 @@ def log_info(msg: str):
             print(f"[ConanMCP] {msg}")
 
 def log_warning(msg: str):
+    _append_log("warning", msg)
     if unreal:
         unreal.log_warning(f"LogConanMCP: {msg}")
     else:
         print(f"[ConanMCP Warning] {msg}")
 
 def log_error(msg: str):
+    _append_log("error", msg)
     if unreal:
         unreal.log_error(f"LogConanMCP: {msg}")
     else:
@@ -116,7 +181,7 @@ def execute_on_game_thread(fn, *args, **kwargs):
 
     _game_thread_queue.put((fn, args, kwargs, result_holder, done_event))
 
-    if not done_event.wait(timeout=30.0):
+    if not done_event.wait(timeout=180.0):
         fn_name = getattr(fn, "__name__", str(fn))
         raise TimeoutError(f"Execution timed out on Game Thread for '{fn_name}'")
 
@@ -126,9 +191,16 @@ def execute_on_game_thread(fn, *args, **kwargs):
     return result_holder["result"]
 
 
+# =============================================================================
+# REGISTRIES (TOOLS, RESOURCES, PROMPTS)
+# =============================================================================
+
 class ToolRegistry:
     def __init__(self):
         self.tools: Dict[str, Dict[str, Any]] = {}
+
+    def clear(self):
+        self.tools.clear()
 
     def register(self, name: str, category: str, description: str, input_schema: dict, security_level: str, handler):
         self.tools[name] = {
@@ -154,8 +226,112 @@ class ToolRegistry:
         return result
 
 
-registry = ToolRegistry()
+class ResourceRegistry:
+    def __init__(self):
+        self.resources: Dict[str, Dict[str, Any]] = {}
+        self.templates: List[Dict[str, Any]] = []
+        self.subscriptions: set = set()
 
+    def clear(self):
+        self.resources.clear()
+        self.templates.clear()
+        self.subscriptions.clear()
+
+    def register(self, uri: str, name: str, mime_type: str, description: str, handler):
+        self.resources[uri] = {
+            "uri": uri,
+            "name": name,
+            "mimeType": mime_type,
+            "description": description,
+            "handler": handler
+        }
+
+    def register_template(self, uri_template: str, name: str, mime_type: str, description: str, handler):
+        self.templates.append({
+            "uriTemplate": uri_template,
+            "name": name,
+            "mimeType": mime_type,
+            "description": description,
+            "handler": handler
+        })
+
+    def list_resources_schema(self) -> List[Dict[str, Any]]:
+        return [{
+            "uri": r["uri"],
+            "name": r["name"],
+            "mimeType": r["mimeType"],
+            "description": r["description"]
+        } for r in self.resources.values()]
+
+    def list_templates_schema(self) -> List[Dict[str, Any]]:
+        return [{
+            "uriTemplate": t["uriTemplate"],
+            "name": t["name"],
+            "mimeType": t["mimeType"],
+            "description": t["description"]
+        } for t in self.templates]
+
+    def read_resource(self, uri: str) -> Dict[str, Any]:
+        if uri in self.resources:
+            r = self.resources[uri]
+            data = execute_on_game_thread(r["handler"], uri)
+            text_val = data if isinstance(data, str) else json.dumps(data, indent=2)
+            return {
+                "uri": uri,
+                "mimeType": r["mimeType"],
+                "text": text_val
+            }
+        # Check templates
+        for t in self.templates:
+            prefix = t["uriTemplate"].split("{")[0]
+            if uri.startswith(prefix):
+                param_val = uri[len(prefix):]
+                data = execute_on_game_thread(t["handler"], uri, param_val)
+                text_val = data if isinstance(data, str) else json.dumps(data, indent=2)
+                return {
+                    "uri": uri,
+                    "mimeType": t["mimeType"],
+                    "text": text_val
+                }
+        raise ValueError(f"Resource not found: '{uri}'")
+
+
+class PromptRegistry:
+    def __init__(self):
+        self.prompts: Dict[str, Dict[str, Any]] = {}
+
+    def clear(self):
+        self.prompts.clear()
+
+    def register(self, name: str, description: str, arguments: List[Dict[str, Any]], handler):
+        self.prompts[name] = {
+            "name": name,
+            "description": description,
+            "arguments": arguments,
+            "handler": handler
+        }
+
+    def list_prompts_schema(self) -> List[Dict[str, Any]]:
+        return [{
+            "name": p["name"],
+            "description": p["description"],
+            "arguments": p["arguments"]
+        } for p in self.prompts.values()]
+
+    def get_prompt(self, name: str, arguments: dict) -> Dict[str, Any]:
+        if name not in self.prompts:
+            raise ValueError(f"Prompt '{name}' not found")
+        return self.prompts[name]["handler"](arguments)
+
+
+registry = ToolRegistry()
+resource_registry = ResourceRegistry()
+prompt_registry = PromptRegistry()
+
+
+# =============================================================================
+# TOOL HANDLERS
+# =============================================================================
 
 # --- 1. EDITOR TOOLS ---
 
@@ -225,15 +401,15 @@ def tool_get_selected_actors(args):
 
 def tool_list_level_actors(args):
     if not unreal:
-        return {"actors": [], "returned_count": 0, "total_matching": 0}
+        return {"actors": [], "returned_count": 0, "total_matching": 0, "offset": 0, "limit": 50, "has_more": False}
     class_filter = args.get("class_filter", "").lower()
     name_filter = args.get("name_filter", "").lower()
     tag_filter = args.get("tag_filter", "")
-    max_results = min(max(int(args.get("max_results", 50)), 1), 500)
+    offset = max(int(args.get("offset", 0)), 0)
+    limit = min(max(int(args.get("limit", args.get("max_results", 50))), 1), 500)
 
     all_actors = unreal.EditorLevelLibrary.get_all_level_actors()
-    result = []
-    matching = 0
+    matching_actors = []
 
     for actor in all_actors:
         cname = actor.get_class().get_name().lower()
@@ -247,16 +423,27 @@ def tool_list_level_actors(args):
         if tag_filter and not actor.actor_has_tag(tag_filter):
             continue
 
-        matching += 1
-        if len(result) < max_results:
-            result.append({
-                "name": actor.get_name(),
-                "label": actor.get_actor_label(),
-                "class": actor.get_class().get_name(),
-                "is_hidden": actor.is_hidden_ed()
-            })
+        matching_actors.append(actor)
 
-    return {"actors": result, "returned_count": len(result), "total_matching": matching}
+    total_matching = len(matching_actors)
+    paged = matching_actors[offset:offset + limit]
+    result = []
+    for actor in paged:
+        result.append({
+            "name": actor.get_name(),
+            "label": actor.get_actor_label(),
+            "class": actor.get_class().get_name(),
+            "is_hidden": actor.is_hidden_ed()
+        })
+
+    return {
+        "actors": result,
+        "returned_count": len(result),
+        "total_matching": total_matching,
+        "offset": offset,
+        "limit": limit,
+        "has_more": (offset + len(result)) < total_matching
+    }
 
 def tool_find_actor(args):
     target = args.get("actor", "").strip()
@@ -277,6 +464,8 @@ def tool_find_actor(args):
 
 def tool_get_actor_info(args):
     target = args.get("actor", "").strip()
+    if not target:
+        raise ValueError("Parameter 'actor' is required")
     if not unreal:
         return {"name": target, "class": "Actor", "components": [], "tags": []}
     
@@ -300,15 +489,22 @@ def tool_get_actor_info(args):
         "name": actor.get_name(),
         "label": actor.get_actor_label(),
         "class": actor.get_class().get_name(),
-        "owner": actor.get_owner().get_name() if actor.get_owner() else "None",
         "tags": tags,
+        "component_count": len(components),
         "components": components
     }
 
 def tool_get_actor_transform(args):
     target = args.get("actor", "").strip()
+    if not target:
+        raise ValueError("Parameter 'actor' is required")
     if not unreal:
-        return {"actor": target, "location": {"x":0,"y":0,"z":0}, "rotation": {"pitch":0,"yaw":0,"roll":0}, "scale": {"x":1,"y":1,"z":1}}
+        return {
+            "actor": target,
+            "location": {"x": 0.0, "y": 0.0, "z": 0.0},
+            "rotation": {"pitch": 0.0, "yaw": 0.0, "roll": 0.0},
+            "scale": {"x": 1.0, "y": 1.0, "z": 1.0}
+        }
     
     actor = None
     for a in unreal.EditorLevelLibrary.get_all_level_actors():
@@ -321,6 +517,7 @@ def tool_get_actor_transform(args):
     loc = actor.get_actor_location()
     rot = actor.get_actor_rotation()
     scale = actor.get_actor_scale3d()
+
     return {
         "actor": actor.get_actor_label(),
         "location": {"x": loc.x, "y": loc.y, "z": loc.z},
@@ -333,7 +530,7 @@ def tool_set_actor_transform(args):
     if not target:
         raise ValueError("Parameter 'actor' is required")
     if not unreal:
-        return {"actor": target, "success": True}
+        return {"actor": target, "updated": True}
 
     actor = None
     for a in unreal.EditorLevelLibrary.get_all_level_actors():
@@ -343,36 +540,24 @@ def tool_set_actor_transform(args):
     if not actor:
         raise ValueError(f"Actor '{target}' not found")
 
-    with unreal.ScopedEditorTransaction(f"ConanMCP: Set Actor Transform ({actor.get_actor_label()})"):
+    with unreal.ScopedEditorTransaction(f"ConanMCP: Set Transform of {actor.get_actor_label()}"):
         actor.modify()
         if "location" in args:
-            loc = actor.get_actor_location()
-            l = args["location"]
-            loc.x = float(l.get("x", loc.x))
-            loc.y = float(l.get("y", loc.y))
-            loc.z = float(l.get("z", loc.z))
-            actor.set_actor_location(loc, False, False)
-
+            loc = args["location"]
+            actor.set_actor_location(unreal.Vector(float(loc.get("x", 0)), float(loc.get("y", 0)), float(loc.get("z", 0))), False, True)
         if "rotation" in args:
-            rot = actor.get_actor_rotation()
-            r = args["rotation"]
-            rot.pitch = float(r.get("pitch", rot.pitch))
-            rot.yaw = float(r.get("yaw", rot.yaw))
-            rot.roll = float(r.get("roll", rot.roll))
-            actor.set_actor_rotation(rot, False)
-
+            rot = args["rotation"]
+            actor.set_actor_rotation(unreal.Rotator(float(rot.get("pitch", 0)), float(rot.get("yaw", 0)), float(rot.get("roll", 0))), False)
         if "scale" in args:
-            scale = actor.get_actor_scale3d()
-            s = args["scale"]
-            scale.x = float(s.get("x", scale.x))
-            scale.y = float(s.get("y", scale.y))
-            scale.z = float(s.get("z", scale.z))
-            actor.set_actor_scale3d(scale)
+            scale = args["scale"]
+            actor.set_actor_scale3d(unreal.Vector(float(scale.get("x", 1)), float(scale.get("y", 1)), float(scale.get("z", 1))))
 
-    return {"actor": actor.get_actor_label(), "success": True}
+    return {"actor": actor.get_actor_label(), "updated": True}
 
 def tool_get_actor_components(args):
     target = args.get("actor", "").strip()
+    if not target:
+        raise ValueError("Parameter 'actor' is required")
     if not unreal:
         return {"actor": target, "components": [], "count": 0}
     
@@ -418,12 +603,13 @@ def _get_asset_dict(ad):
 
 def tool_find_assets(args):
     if not unreal:
-        return {"assets": [], "returned_count": 0, "total_matching": 0}
+        return {"assets": [], "returned_count": 0, "total_matching": 0, "offset": 0, "limit": 50, "has_more": False}
 
     class_name = args.get("class_name", "").strip()
     package_path = args.get("package_path", "/Game").strip()
     name_filter = args.get("name_filter", "").strip().lower()
-    max_results = min(max(int(args.get("max_results", 50)), 1), 500)
+    offset = max(int(args.get("offset", 0)), 0)
+    limit = min(max(int(args.get("limit", args.get("max_results", 50))), 1), 500)
 
     asset_registry = unreal.AssetRegistryHelpers.get_asset_registry()
     ar_filter = unreal.ARFilter(
@@ -435,18 +621,26 @@ def tool_find_assets(args):
         ar_filter.class_names = [class_name]
 
     assets = asset_registry.get_assets(ar_filter)
-    result = []
-    matching = 0
+    matching_ads = []
 
     for ad in assets:
         aname = str(ad.asset_name)
         if name_filter and name_filter not in aname.lower():
             continue
-        matching += 1
-        if len(result) < max_results:
-            result.append(_get_asset_dict(ad))
+        matching_ads.append(ad)
 
-    return {"assets": result, "returned_count": len(result), "total_matching": matching}
+    total_matching = len(matching_ads)
+    paged_ads = matching_ads[offset:offset + limit]
+    result = [_get_asset_dict(ad) for ad in paged_ads]
+
+    return {
+        "assets": result,
+        "returned_count": len(result),
+        "total_matching": total_matching,
+        "offset": offset,
+        "limit": limit,
+        "has_more": (offset + len(result)) < total_matching
+    }
 
 def tool_get_asset_info(args):
     path = args.get("asset_path", "").strip()
@@ -547,7 +741,6 @@ def tool_get_skeleton_sockets(args):
     if isinstance(asset, unreal.SkeletalMesh):
         mesh = asset
     elif isinstance(asset, unreal.Skeleton):
-        # Find a mesh that uses this skeleton
         mesh = unreal.EditorAssetLibrary.load_asset("/Game/Characters/humans/meshes/SK_human_male.SK_human_male")
 
     sockets_data = []
@@ -564,7 +757,22 @@ def tool_get_skeleton_sockets(args):
     return {"sockets": sockets_data, "count": len(sockets_data)}
 
 def tool_get_bones(args):
-    return tool_get_skeleton_sockets(args)
+    mesh_path = args.get("mesh_path", "/Game/Characters/humans/meshes/SK_human_male.SK_human_male").strip()
+    if not unreal:
+        return {"mesh_path": mesh_path, "bones": [], "bone_count": 0}
+    mesh = unreal.EditorAssetLibrary.load_asset(mesh_path)
+    if not mesh:
+        raise ValueError(f"Mesh not found at '{mesh_path}'")
+    bones_list = []
+    try:
+        temp_comp = unreal.SkeletalMeshComponent()
+        temp_comp.set_skeletal_mesh_asset(mesh) if hasattr(temp_comp, "set_skeletal_mesh_asset") else temp_comp.set_skeletal_mesh(mesh)
+        for bname in temp_comp.get_bone_names():
+            bones_list.append(str(bname))
+    except Exception:
+        # Fallback to sockets if bone enumeration is unavailable
+        return tool_get_skeleton_sockets(args)
+    return {"mesh_path": mesh_path, "bones": bones_list[:100], "bone_count": len(bones_list)}
 
 
 # --- 5. BLUEPRINT TOOLS ---
@@ -573,7 +781,9 @@ def tool_find_blueprint(args):
     return tool_find_assets({
         "class_name": "Blueprint",
         "name_filter": args.get("name", ""),
-        "package_path": args.get("path", "/Game")
+        "package_path": args.get("path", "/Game"),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 def tool_get_blueprint_info(args):
@@ -618,7 +828,6 @@ def tool_create_blueprint(args):
     if not unreal:
         return {"created": True, "name": name, "full_path": f"{pkg_path}/{name}.{name}"}
 
-    # Resolve parent UClass
     parent_uclass = None
     if parent_class_name.lower() in ["actorcomponent", "component"]:
         parent_uclass = unreal.ActorComponent.static_class()
@@ -747,7 +956,9 @@ def tool_find_datatable(args):
     return tool_find_assets({
         "class_name": "DataTable",
         "name_filter": args.get("name", ""),
-        "package_path": args.get("path", "")
+        "package_path": args.get("path", ""),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 def tool_get_datatable_info(args):
@@ -790,7 +1001,6 @@ def tool_get_datatable_row(args):
     dt = unreal.EditorAssetLibrary.load_asset(table_path)
     if not dt or not isinstance(dt, unreal.DataTable):
         raise ValueError(f"DataTable not found at '{table_path}'")
-    # Query row map
     return {
         "datatable": dt.get_name(),
         "row_name": row_name,
@@ -804,17 +1014,26 @@ def tool_find_particle_systems(args):
     name = args.get("name", "")
     ptype = args.get("type", "All").lower()
     path = args.get("path", "")
+    offset = args.get("offset", 0)
+    limit = args.get("limit", 50)
     
     if ptype == "cascade":
-        return tool_find_assets({"class_name": "ParticleSystem", "name_filter": name, "package_path": path})
+        return tool_find_assets({"class_name": "ParticleSystem", "name_filter": name, "package_path": path, "offset": offset, "limit": limit})
     elif ptype == "niagara":
-        return tool_find_assets({"class_name": "NiagaraSystem", "name_filter": name, "package_path": path})
+        return tool_find_assets({"class_name": "NiagaraSystem", "name_filter": name, "package_path": path, "offset": offset, "limit": limit})
     else:
-        # Search both
-        c_res = tool_find_assets({"class_name": "ParticleSystem", "name_filter": name, "package_path": path})
-        n_res = tool_find_assets({"class_name": "NiagaraSystem", "name_filter": name, "package_path": path})
+        c_res = tool_find_assets({"class_name": "ParticleSystem", "name_filter": name, "package_path": path, "limit": 200})
+        n_res = tool_find_assets({"class_name": "NiagaraSystem", "name_filter": name, "package_path": path, "limit": 200})
         combined = c_res.get("assets", []) + n_res.get("assets", [])
-        return {"particles": combined[:50], "count": len(combined)}
+        paged = combined[offset:offset + limit]
+        return {
+            "particles": paged,
+            "returned_count": len(paged),
+            "total_matching": len(combined),
+            "offset": offset,
+            "limit": limit,
+            "has_more": (offset + len(paged)) < len(combined)
+        }
 
 def tool_get_particle_info(args):
     path = args.get("particle_path", "").strip()
@@ -873,7 +1092,6 @@ def tool_preview_particle_on_actor(args):
 
     with unreal.ScopedEditorTransaction(f"ConanMCP: Preview Particle on {actor.get_actor_label()}"):
         actor.modify()
-        # Attach component
         parent_comp = actor.get_editor_property("root_component")
         if socket_name:
             skel_comp = actor.get_component_by_class(unreal.SkeletalMeshComponent)
@@ -943,157 +1161,1025 @@ def tool_find_conan_assets(args):
     return tool_find_assets({
         "package_path": "/Game",
         "name_filter": args.get("query", ""),
-        "class_name": args.get("class_name", "")
+        "class_name": args.get("class_name", ""),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 def tool_find_conan_datatables(args):
     return tool_find_assets({
         "package_path": "/Game",
         "class_name": "DataTable",
-        "name_filter": args.get("query", "")
+        "name_filter": args.get("query", ""),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 def tool_find_conan_characters(args):
     return tool_find_assets({
         "package_path": "/Game",
         "class_name": "Blueprint",
-        "name_filter": args.get("query", "Char")
+        "name_filter": args.get("query", "Char"),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 def tool_find_conan_items(args):
     return tool_find_assets({
         "package_path": "/Game",
-        "name_filter": args.get("query", "Item")
+        "name_filter": args.get("query", "Item"),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 def tool_find_conan_particles(args):
     return tool_find_particle_systems({
         "path": "/Game",
-        "name": args.get("query", "")
+        "name": args.get("query", ""),
+        "offset": args.get("offset", 0),
+        "limit": args.get("limit", 50)
     })
 
 
+# --- 9. SCRIPTING, DIAGNOSTICS & MANAGEMENT TOOLS ---
+
+def tool_execute_python(args):
+    code = args.get("code", "").strip()
+    if not code:
+        raise ValueError("Parameter 'code' is required")
+    import io
+    import contextlib
+    import traceback
+    stdout_capture = io.StringIO()
+    stderr_capture = io.StringIO()
+    env = {
+        "unreal": unreal,
+        "registry": registry,
+        "resource_registry": resource_registry,
+        "prompt_registry": prompt_registry,
+        "__name__": "__main__"
+    }
+    success = True
+    error_msg = None
+    result = None
+    with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
+        try:
+            compiled = compile(code, "<mcp_exec>", "exec")
+            exec(compiled, env)
+            if "_result" in env:
+                result = env["_result"]
+        except Exception as e:
+            success = False
+            error_msg = f"{e}\n{traceback.format_exc()}"
+    return {
+        "success": success,
+        "stdout": stdout_capture.getvalue(),
+        "stderr": stderr_capture.getvalue(),
+        "result": str(result) if result is not None else None,
+        "error": error_msg
+    }
+
+def tool_get_mcp_diagnostics(args):
+    now = time.time()
+    uptime = round(now - _server_start_time, 2)
+    return {
+        "mcp_protocol_version": "2024-11-05",
+        "server_version": "1.1.0",
+        "service": "ConanMCP",
+        "uptime_seconds": uptime,
+        "total_requests": _request_counter,
+        "total_errors": _error_counter,
+        "registered_tools_count": len(registry.tools),
+        "registered_resources_count": len(resource_registry.resources),
+        "registered_resource_templates_count": len(resource_registry.templates),
+        "registered_prompts_count": len(prompt_registry.prompts),
+        "active_sse_sessions": len(sse_manager.sessions),
+        "game_thread_queue_pending": _game_thread_queue.qsize(),
+        "recent_logs_buffered": len(_recent_logs_buffer),
+        "engine_active": unreal is not None
+    }
+
+def tool_reload_server(args):
+    import importlib
+    import conan_mcp_server
+    importlib.reload(conan_mcp_server)
+    conan_mcp_server.register_all_tools()
+    conan_mcp_server.register_all_resources()
+    conan_mcp_server.register_all_prompts()
+    conan_mcp_server.ensure_ticker_registered()
+    sse_manager.broadcast_notification("notifications/tools/list_changed", {})
+    return {
+        "reloaded": True,
+        "tools_count": len(conan_mcp_server.registry.tools),
+        "resources_count": len(conan_mcp_server.resource_registry.resources),
+        "prompts_count": len(conan_mcp_server.prompt_registry.prompts)
+    }
+
+
 # =============================================================================
-# REGISTRATION OF ALL TOOLS
+# RESOURCE HANDLERS
+# =============================================================================
+
+def resource_devkit_status(uri: str) -> dict:
+    world_name = "None"
+    map_path = "None"
+    actor_count = 0
+    is_dirty = False
+    if unreal:
+        world = unreal.EditorLevelLibrary.get_editor_world()
+        if world:
+            world_name = world.get_name()
+            map_path = world.get_path_name()
+            actors = unreal.EditorLevelLibrary.get_all_level_actors()
+            actor_count = len(actors)
+            try:
+                is_dirty = unreal.EditorLoadingAndSavingUtils.is_package_dirty(world.get_outermost())
+            except Exception:
+                pass
+    return {
+        "service": "ConanMCP",
+        "engine_version": "5.8.2-377096+++exiles+release",
+        "devkit": "Conan Exiles Enhanced DevKit",
+        "is_editor_active": True if unreal else False,
+        "current_world": world_name,
+        "current_map_path": map_path,
+        "actor_count": actor_count,
+        "is_dirty": is_dirty,
+        "uptime_seconds": round(time.time() - _server_start_time, 1),
+        "registered_tools": len(registry.tools),
+        "registered_resources": len(resource_registry.resources),
+        "registered_prompts": len(prompt_registry.prompts)
+    }
+
+def resource_devkit_logs(uri: str) -> str:
+    if not _recent_logs_buffer:
+        return "[ConanMCP] No logs recorded in buffer."
+    return "\n".join(list(_recent_logs_buffer))
+
+def resource_devkit_outliner(uri: str) -> dict:
+    if not unreal:
+        return {"actors": [], "count": 0}
+    actors = unreal.EditorLevelLibrary.get_all_level_actors()
+    items = []
+    for a in actors[:200]:
+        items.append({
+            "name": a.get_name(),
+            "label": a.get_actor_label(),
+            "class": a.get_class().get_name(),
+            "hidden": a.is_hidden_ed()
+        })
+    return {"total_in_level": len(actors), "count": len(items), "actors": items}
+
+def resource_conan_tables(uri: str) -> dict:
+    if not unreal:
+        return {"tables": [], "count": 0}
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    ar_filter = unreal.ARFilter(
+        recursive_paths=True,
+        package_paths=["/Game", "/ConanSandbox"],
+        recursive_classes=True,
+        class_names=["DataTable"]
+    )
+    assets = ar.get_assets(ar_filter)
+    tables = []
+    for ad in assets[:100]:
+        tables.append({
+            "name": str(ad.asset_name),
+            "package": str(ad.package_name)
+        })
+    return {"tables": tables, "count": len(tables)}
+
+def resource_template_conan_asset(uri: str, package_path: str) -> dict:
+    if not unreal:
+        return {"package_path": package_path, "status": "Mock asset metadata"}
+    ar = unreal.AssetRegistryHelpers.get_asset_registry()
+    ad = ar.get_asset_by_object_path(package_path)
+    if not ad.is_valid():
+        assets = ar.get_assets_by_package_name(package_path)
+        if assets:
+            ad = assets[0]
+    if not ad.is_valid():
+        raise ValueError(f"Asset not found at '{package_path}'")
+    return _get_asset_dict(ad)
+
+
+# =============================================================================
+# PROMPT HANDLERS
+# =============================================================================
+
+def prompt_create_conan_item(args: dict) -> dict:
+    item_name = args.get("item_name", "MyCustomSword")
+    item_type = args.get("item_type", "Weapon")
+    description = args.get("description", "A custom weapon for Conan Exiles")
+    prompt_text = f"""You are an expert Conan Exiles DevKit modder and Unreal Engine 5 developer.
+Help the user create a new {item_type} mod named '{item_name}'.
+Item Description: {description}
+
+Recommended Step-by-Step Workflow using ConanMCP:
+1. Query Conan DataTables using `find_conan_datatables(query='ItemTable')` to locate the primary ItemTable.
+2. Search existing {item_type} assets using `find_conan_items(query='{item_name}')` or similar archetypes to inspect their property structure.
+3. If creating a new Blueprint, use `create_blueprint(name='BP_{item_name}', package_path='/Game/Mods/{item_name}', parent_class='Item')`.
+4. Inspect character sockets using `get_character_sockets()` to verify hand/sheath attach points.
+5. If particle effects (blood, flame, glow) are needed, search VFX using `find_conan_particles` and preview on actor sockets using `preview_particle_on_actor`.
+6. Save all new assets using `save_asset(package_name=...)`.
+
+Begin by inspecting the Conan ItemTable and archetypes for this item."""
+    return {
+        "description": f"Workflow for creating a custom Conan Exiles {item_type}: {item_name}",
+        "messages": [
+            {"role": "user", "content": {"type": "text", "text": prompt_text}}
+        ]
+    }
+
+def prompt_audit_level_performance(args: dict) -> dict:
+    prompt_text = """You are an Unreal Engine 5 performance optimization expert for Conan Exiles.
+Perform a performance audit of the currently active level in the Conan Exiles DevKit.
+
+Instructions:
+1. Call `get_current_level` and `get_editor_status` to determine the active map and actor count.
+2. Call `list_level_actors(limit=100)` to analyze actor types and identify potential bottlenecks:
+   - High density of dynamic/stationary lights.
+   - Large numbers of unbatched StaticMeshActors.
+   - Active preview particles or spawning emitters.
+3. Review actor components and transforms using `get_actor_components` and `get_actor_transform`.
+4. Summarize your findings with actionable recommendations to improve frame rate and memory footprint."""
+    return {
+        "description": "Audit performance and actor density of the active level",
+        "messages": [
+            {"role": "user", "content": {"type": "text", "text": prompt_text}}
+        ]
+    }
+
+def prompt_inspect_character_skeleton(args: dict) -> dict:
+    mesh_path = args.get("mesh_path", "/Game/Characters/humans/meshes/SK_human_male.SK_human_male")
+    prompt_text = f"""You are a character technical artist for Conan Exiles.
+Inspect the skeletal mesh and socket structure at: '{mesh_path}'.
+
+Instructions:
+1. Call `get_skeletal_mesh_info(mesh_path='{mesh_path}')` to inspect LOD counts, skeleton bindings, and materials.
+2. Call `get_skeleton_sockets(asset_path='{mesh_path}')` to list all weapon attach, armor, and VFX sockets.
+3. Verify critical Conan sockets:
+   - Hand_R, Hand_L (Weapons/Shields)
+   - Spine2, Pelvis (Back/Sheaths/Quivers)
+   - Head, Foot_L, Foot_R (Armor & Footstep VFX)
+4. Report socket names and advise how to attach gear or Niagara emitters cleanly."""
+    return {
+        "description": f"Inspect skeleton, bones and sockets for {mesh_path}",
+        "messages": [
+            {"role": "user", "content": {"type": "text", "text": prompt_text}}
+        ]
+    }
+
+def prompt_debug_niagara_vfx(args: dict) -> dict:
+    vfx_query = args.get("vfx_query", "Blood")
+    prompt_text = f"""You are a visual effects (VFX) technical artist for Unreal Engine 5.
+Search, inspect, and test particle systems matching '{vfx_query}' in the Conan DevKit.
+
+Instructions:
+1. Call `find_particle_systems(name='{vfx_query}')` to discover matching Cascade and Niagara systems.
+2. For top results, call `get_particle_info(particle_path=...)` to check system type and class.
+3. Check selected actor or active character in level using `get_selected_actors` or `get_character_sockets`.
+4. Preview the effect on an actor socket using `preview_particle_on_actor`.
+5. Once tested, remove preview particles using `remove_preview_particle`."""
+    return {
+        "description": f"Diagnose and preview particle systems matching '{vfx_query}'",
+        "messages": [
+            {"role": "user", "content": {"type": "text", "text": prompt_text}}
+        ]
+    }
+
+
+# =============================================================================
+# REGISTRATION OF ALL TOOLS, RESOURCES & PROMPTS
 # =============================================================================
 
 def register_all_tools():
+    registry.clear()
     # Editor
     registry.register("get_editor_status", "Editor", "Returns editor status, engine version, and active map.", {"type": "object", "properties": {}}, READ_ONLY, tool_get_editor_status)
     registry.register("get_current_level", "Editor", "Returns currently loaded level path, dirty status, and actor count.", {"type": "object", "properties": {}}, READ_ONLY, tool_get_current_level)
     registry.register("save_current_level", "Editor", "Saves the currently active level in the editor.", {"type": "object", "properties": {}}, SAFE_WRITE, tool_save_current_level)
     registry.register("get_selected_actors", "Editor", "Returns all currently selected actors with labels, classes, and transforms.", {"type": "object", "properties": {}}, READ_ONLY, tool_get_selected_actors)
+    registry.register("get_mcp_diagnostics", "Editor", "Returns detailed MCP server diagnostics, protocol version, uptime, and queue stats.", {"type": "object", "properties": {}}, READ_ONLY, tool_get_mcp_diagnostics)
 
     # Actors
-    registry.register("list_level_actors", "Actors", "Lists actors in the current level with optional class/name/tag filter.", {"type": "object", "properties": {"class_filter": {"type": "string"}, "name_filter": {"type": "string"}, "tag_filter": {"type": "string"}, "max_results": {"type": "number"}}}, READ_ONLY, tool_list_level_actors)
-    registry.register("find_actor", "Actors", "Finds a specific actor by name or label.", {"type": "object", "properties": {"actor": {"type": "string"}}, "required": ["actor"]}, READ_ONLY, tool_find_actor)
-    registry.register("get_actor_info", "Actors", "Returns detailed info for an actor including tags and components.", {"type": "object", "properties": {"actor": {"type": "string"}}, "required": ["actor"]}, READ_ONLY, tool_get_actor_info)
-    registry.register("get_actor_transform", "Actors", "Gets location, rotation, and scale of an actor.", {"type": "object", "properties": {"actor": {"type": "string"}}, "required": ["actor"]}, READ_ONLY, tool_get_actor_transform)
-    registry.register("set_actor_transform", "Actors", "Sets location, rotation, and/or scale of an actor with Undo/Redo transaction.", {"type": "object", "properties": {"actor": {"type": "string"}, "location": {"type": "object"}, "rotation": {"type": "object"}, "scale": {"type": "object"}}, "required": ["actor"]}, SAFE_WRITE, tool_set_actor_transform)
-    registry.register("get_actor_components", "Actors", "Lists all components on an actor.", {"type": "object", "properties": {"actor": {"type": "string"}}, "required": ["actor"]}, READ_ONLY, tool_get_actor_components)
+    registry.register("list_level_actors", "Actors", "Lists actors in the current level with pagination and optional class/name/tag filters.", {
+        "type": "object",
+        "properties": {
+            "class_filter": {"type": "string", "description": "Optional substring to filter actor class names"},
+            "name_filter": {"type": "string", "description": "Optional substring to filter actor name or label"},
+            "tag_filter": {"type": "string", "description": "Optional actor gameplay tag"},
+            "offset": {"type": "integer", "description": "Pagination offset (default: 0)"},
+            "limit": {"type": "integer", "description": "Max results to return (default: 50, max: 500)"},
+            "max_results": {"type": "integer", "description": "Legacy alias for limit"}
+        }
+    }, READ_ONLY, tool_list_level_actors)
+    registry.register("find_actor", "Actors", "Finds a specific actor by name or label.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Exact name or label of the actor to find"}
+        },
+        "required": ["actor"]
+    }, READ_ONLY, tool_find_actor)
+    registry.register("get_actor_info", "Actors", "Returns detailed info for an actor including tags and components.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Actor name or label"}
+        },
+        "required": ["actor"]
+    }, READ_ONLY, tool_get_actor_info)
+    registry.register("get_actor_transform", "Actors", "Gets location, rotation, and scale of an actor.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Actor name or label"}
+        },
+        "required": ["actor"]
+    }, READ_ONLY, tool_get_actor_transform)
+    registry.register("set_actor_transform", "Actors", "Sets location, rotation, and/or scale of an actor with Undo/Redo transaction.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Actor name or label"},
+            "location": {"type": "object", "description": "Dict with x, y, z coordinates"},
+            "rotation": {"type": "object", "description": "Dict with pitch, yaw, roll angles in degrees"},
+            "scale": {"type": "object", "description": "Dict with x, y, z scale factors"}
+        },
+        "required": ["actor"]
+    }, SAFE_WRITE, tool_set_actor_transform)
+    registry.register("get_actor_components", "Actors", "Lists all components on an actor.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Actor name or label"}
+        },
+        "required": ["actor"]
+    }, READ_ONLY, tool_get_actor_components)
 
     # Assets
-    registry.register("find_assets", "Assets", "Searches assets using AssetRegistry without loading UObjects into memory.", {"type": "object", "properties": {"class_name": {"type": "string"}, "package_path": {"type": "string"}, "name_filter": {"type": "string"}, "max_results": {"type": "number"}}}, READ_ONLY, tool_find_assets)
-    registry.register("get_asset_info", "Assets", "Returns metadata and tags for an asset.", {"type": "object", "properties": {"asset_path": {"type": "string"}}, "required": ["asset_path"]}, READ_ONLY, tool_get_asset_info)
-    registry.register("get_asset_class", "Assets", "Returns the class of an asset given its path.", {"type": "object", "properties": {"asset_path": {"type": "string"}}, "required": ["asset_path"]}, READ_ONLY, tool_get_asset_class)
-    registry.register("get_asset_path", "Assets", "Resolves an asset name to its package and object paths.", {"type": "object", "properties": {"asset_name": {"type": "string"}}, "required": ["asset_name"]}, READ_ONLY, tool_get_asset_path)
-    registry.register("get_asset_dependencies", "Assets", "Queries dependencies and referencers of an asset.", {"type": "object", "properties": {"package_name": {"type": "string"}}, "required": ["package_name"]}, READ_ONLY, tool_get_asset_dependencies)
-    registry.register("save_asset", "Assets", "Saves an asset package to disk.", {"type": "object", "properties": {"package_name": {"type": "string"}}, "required": ["package_name"]}, SAFE_WRITE, tool_save_asset)
-    registry.register("create_blueprint", "Assets", "Creates a new Blueprint asset.", {"type": "object", "properties": {"name": {"type": "string"}, "package_path": {"type": "string"}, "parent_class": {"type": "string"}}, "required": ["name", "package_path"]}, SAFE_WRITE, tool_create_blueprint)
-    registry.register("create_widget_blueprint", "Assets", "Creates a new Widget Blueprint asset.", {"type": "object", "properties": {"name": {"type": "string"}, "package_path": {"type": "string"}}, "required": ["name", "package_path"]}, SAFE_WRITE, tool_create_widget_blueprint)
-    registry.register("create_struct", "Assets", "Creates a new UserDefinedStruct asset.", {"type": "object", "properties": {"name": {"type": "string"}, "package_path": {"type": "string"}}, "required": ["name", "package_path"]}, SAFE_WRITE, tool_create_struct)
-    registry.register("create_enum", "Assets", "Creates a new UserDefinedEnum asset.", {"type": "object", "properties": {"name": {"type": "string"}, "package_path": {"type": "string"}}, "required": ["name", "package_path"]}, SAFE_WRITE, tool_create_enum)
-    registry.register("create_datatable", "Assets", "Creates a new DataTable asset.", {"type": "object", "properties": {"name": {"type": "string"}, "package_path": {"type": "string"}, "struct_path": {"type": "string"}}, "required": ["name", "package_path"]}, SAFE_WRITE, tool_create_datatable)
+    registry.register("find_assets", "Assets", "Searches assets using AssetRegistry with pagination without loading UObjects into memory.", {
+        "type": "object",
+        "properties": {
+            "class_name": {"type": "string", "description": "Unreal asset class name, e.g. 'Blueprint', 'StaticMesh', 'NiagaraSystem'"},
+            "package_path": {"type": "string", "description": "Root package directory to search (e.g. '/Game', '/ConanSandbox')"},
+            "name_filter": {"type": "string", "description": "Substring to search in asset name"},
+            "offset": {"type": "integer", "description": "Pagination offset (default: 0)"},
+            "limit": {"type": "integer", "description": "Max results to return (default: 50, max: 500)"},
+            "max_results": {"type": "integer", "description": "Legacy alias for limit"}
+        }
+    }, READ_ONLY, tool_find_assets)
+    registry.register("get_asset_info", "Assets", "Returns metadata and tags for an asset.", {
+        "type": "object",
+        "properties": {
+            "asset_path": {"type": "string", "description": "Object path or package path of the asset"}
+        },
+        "required": ["asset_path"]
+    }, READ_ONLY, tool_get_asset_info)
+    registry.register("get_asset_class", "Assets", "Returns the class of an asset given its path.", {
+        "type": "object",
+        "properties": {
+            "asset_path": {"type": "string", "description": "Asset object path"}
+        },
+        "required": ["asset_path"]
+    }, READ_ONLY, tool_get_asset_class)
+    registry.register("get_asset_path", "Assets", "Resolves an asset name to its package and object paths.", {
+        "type": "object",
+        "properties": {
+            "asset_name": {"type": "string", "description": "Name of the asset"}
+        },
+        "required": ["asset_name"]
+    }, READ_ONLY, tool_get_asset_path)
+    registry.register("get_asset_dependencies", "Assets", "Queries dependencies and referencers of an asset.", {
+        "type": "object",
+        "properties": {
+            "package_name": {"type": "string", "description": "Package name, e.g. '/Game/Characters/Player'"}
+        },
+        "required": ["package_name"]
+    }, READ_ONLY, tool_get_asset_dependencies)
+    registry.register("save_asset", "Assets", "Saves an asset package to disk.", {
+        "type": "object",
+        "properties": {
+            "package_name": {"type": "string", "description": "Package name to save"}
+        },
+        "required": ["package_name"]
+    }, SAFE_WRITE, tool_save_asset)
+    registry.register("create_blueprint", "Assets", "Creates a new Blueprint asset.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name of the new Blueprint"},
+            "package_path": {"type": "string", "description": "Destination package directory (e.g. '/Game/Mods')"},
+            "parent_class": {"type": "string", "description": "Parent class name (default: 'Actor')"}
+        },
+        "required": ["name", "package_path"]
+    }, SAFE_WRITE, tool_create_blueprint)
+    registry.register("create_widget_blueprint", "Assets", "Creates a new Widget Blueprint asset.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name of the new Widget Blueprint"},
+            "package_path": {"type": "string", "description": "Destination package directory"}
+        },
+        "required": ["name", "package_path"]
+    }, SAFE_WRITE, tool_create_widget_blueprint)
+    registry.register("create_struct", "Assets", "Creates a new UserDefinedStruct asset.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name of the new Struct"},
+            "package_path": {"type": "string", "description": "Destination package directory"}
+        },
+        "required": ["name", "package_path"]
+    }, SAFE_WRITE, tool_create_struct)
+    registry.register("create_enum", "Assets", "Creates a new UserDefinedEnum asset.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name of the new Enum"},
+            "package_path": {"type": "string", "description": "Destination package directory"}
+        },
+        "required": ["name", "package_path"]
+    }, SAFE_WRITE, tool_create_enum)
+    registry.register("create_datatable", "Assets", "Creates a new DataTable asset.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Name of the new DataTable"},
+            "package_path": {"type": "string", "description": "Destination package directory"},
+            "struct_path": {"type": "string", "description": "Path to the row struct definition"}
+        },
+        "required": ["name", "package_path"]
+    }, SAFE_WRITE, tool_create_datatable)
 
     # Skeletons
-    registry.register("get_skeletal_mesh_info", "Skeleton", "Returns SkeletalMesh LODs, materials, and skeleton.", {"type": "object", "properties": {"mesh_path": {"type": "string"}}, "required": ["mesh_path"]}, READ_ONLY, tool_get_skeletal_mesh_info)
-    registry.register("get_skeleton_info", "Skeleton", "Returns bone and socket counts for a Skeleton.", {"type": "object", "properties": {"skeleton_path": {"type": "string"}}, "required": ["skeleton_path"]}, READ_ONLY, tool_get_skeleton_info)
-    registry.register("get_skeleton_sockets", "Skeleton", "Lists sockets and attach bones on a Skeleton.", {"type": "object", "properties": {"asset_path": {"type": "string"}}, "required": ["asset_path"]}, READ_ONLY, tool_get_skeleton_sockets)
-    registry.register("get_bones", "Skeleton", "Returns bone hierarchy of a SkeletalMesh.", {"type": "object", "properties": {"mesh_path": {"type": "string"}}, "required": ["mesh_path"]}, READ_ONLY, tool_get_bones)
+    registry.register("get_skeletal_mesh_info", "Skeleton", "Returns SkeletalMesh LODs, materials, and skeleton.", {
+        "type": "object",
+        "properties": {
+            "mesh_path": {"type": "string", "description": "Object path of the SkeletalMesh"}
+        },
+        "required": ["mesh_path"]
+    }, READ_ONLY, tool_get_skeletal_mesh_info)
+    registry.register("get_skeleton_info", "Skeleton", "Returns bone and socket counts for a Skeleton.", {
+        "type": "object",
+        "properties": {
+            "skeleton_path": {"type": "string", "description": "Object path of the Skeleton"}
+        },
+        "required": ["skeleton_path"]
+    }, READ_ONLY, tool_get_skeleton_info)
+    registry.register("get_skeleton_sockets", "Skeleton", "Lists sockets and attach bones on a Skeleton.", {
+        "type": "object",
+        "properties": {
+            "asset_path": {"type": "string", "description": "Object path of the SkeletalMesh or Skeleton"}
+        },
+        "required": ["asset_path"]
+    }, READ_ONLY, tool_get_skeleton_sockets)
+    registry.register("get_bones", "Skeleton", "Returns bone hierarchy of a SkeletalMesh.", {
+        "type": "object",
+        "properties": {
+            "mesh_path": {"type": "string", "description": "Object path of the SkeletalMesh"}
+        },
+        "required": ["mesh_path"]
+    }, READ_ONLY, tool_get_bones)
 
     # Blueprints
-    registry.register("find_blueprint", "Blueprints", "Searches for Blueprint assets.", {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}}, READ_ONLY, tool_find_blueprint)
-    registry.register("get_blueprint_info", "Blueprints", "Returns parent class and generated class of a Blueprint.", {"type": "object", "properties": {"blueprint_path": {"type": "string"}}, "required": ["blueprint_path"]}, READ_ONLY, tool_get_blueprint_info)
-    registry.register("get_blueprint_parent_class", "Blueprints", "Returns direct parent class of a Blueprint.", {"type": "object", "properties": {"blueprint_path": {"type": "string"}}, "required": ["blueprint_path"]}, READ_ONLY, tool_get_blueprint_parent_class)
-    registry.register("get_blueprint_variables", "Blueprints", "Lists member variables of a Blueprint.", {"type": "object", "properties": {"blueprint_path": {"type": "string"}}, "required": ["blueprint_path"]}, READ_ONLY, tool_get_blueprint_variables)
+    registry.register("find_blueprint", "Blueprints", "Searches for Blueprint assets.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Substring to search in Blueprint name"},
+            "path": {"type": "string", "description": "Search directory (default: '/Game')"}
+        }
+    }, READ_ONLY, tool_find_blueprint)
+    registry.register("get_blueprint_info", "Blueprints", "Returns parent class and generated class of a Blueprint.", {
+        "type": "object",
+        "properties": {
+            "blueprint_path": {"type": "string", "description": "Object path of the Blueprint"}
+        },
+        "required": ["blueprint_path"]
+    }, READ_ONLY, tool_get_blueprint_info)
+    registry.register("get_blueprint_parent_class", "Blueprints", "Returns direct parent class of a Blueprint.", {
+        "type": "object",
+        "properties": {
+            "blueprint_path": {"type": "string", "description": "Object path of the Blueprint"}
+        },
+        "required": ["blueprint_path"]
+    }, READ_ONLY, tool_get_blueprint_parent_class)
+    registry.register("get_blueprint_variables", "Blueprints", "Lists member variables of a Blueprint.", {
+        "type": "object",
+        "properties": {
+            "blueprint_path": {"type": "string", "description": "Object path of the Blueprint"}
+        },
+        "required": ["blueprint_path"]
+    }, READ_ONLY, tool_get_blueprint_variables)
 
     # DataTables
-    registry.register("find_datatable", "DataTable", "Searches for DataTable assets.", {"type": "object", "properties": {"name": {"type": "string"}, "path": {"type": "string"}}}, READ_ONLY, tool_find_datatable)
-    registry.register("get_datatable_info", "DataTable", "Returns row count and row names of a DataTable.", {"type": "object", "properties": {"datatable_path": {"type": "string"}}, "required": ["datatable_path"]}, READ_ONLY, tool_get_datatable_info)
-    registry.register("list_datatable_rows", "DataTable", "Lists row names in a DataTable with pagination.", {"type": "object", "properties": {"datatable_path": {"type": "string"}, "offset": {"type": "number"}, "limit": {"type": "number"}}, "required": ["datatable_path"]}, READ_ONLY, tool_list_datatable_rows)
-    registry.register("get_datatable_row", "DataTable", "Returns data of a specific DataTable row.", {"type": "object", "properties": {"datatable_path": {"type": "string"}, "row_name": {"type": "string"}}, "required": ["datatable_path", "row_name"]}, READ_ONLY, tool_get_datatable_row)
+    registry.register("find_datatable", "DataTable", "Searches for DataTable assets.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Substring to search in DataTable name"},
+            "path": {"type": "string", "description": "Search directory"}
+        }
+    }, READ_ONLY, tool_find_datatable)
+    registry.register("get_datatable_info", "DataTable", "Returns row count and row names of a DataTable.", {
+        "type": "object",
+        "properties": {
+            "datatable_path": {"type": "string", "description": "Object path of the DataTable"}
+        },
+        "required": ["datatable_path"]
+    }, READ_ONLY, tool_get_datatable_info)
+    registry.register("list_datatable_rows", "DataTable", "Lists row names in a DataTable with pagination.", {
+        "type": "object",
+        "properties": {
+            "datatable_path": {"type": "string", "description": "Object path of the DataTable"},
+            "offset": {"type": "number", "description": "Row offset (default: 0)"},
+            "limit": {"type": "number", "description": "Number of rows to return (default: 50, max: 200)"}
+        },
+        "required": ["datatable_path"]
+    }, READ_ONLY, tool_list_datatable_rows)
+    registry.register("get_datatable_row", "DataTable", "Returns data of a specific DataTable row.", {
+        "type": "object",
+        "properties": {
+            "datatable_path": {"type": "string", "description": "Object path of the DataTable"},
+            "row_name": {"type": "string", "description": "Row identifier name"}
+        },
+        "required": ["datatable_path", "row_name"]
+    }, READ_ONLY, tool_get_datatable_row)
 
     # Particles
-    registry.register("find_particle_systems", "Particles", "Searches for Niagara and Cascade particles.", {"type": "object", "properties": {"name": {"type": "string"}, "type": {"type": "string"}, "path": {"type": "string"}}}, READ_ONLY, tool_find_particle_systems)
-    registry.register("get_particle_info", "Particles", "Returns particle system details.", {"type": "object", "properties": {"particle_path": {"type": "string"}}, "required": ["particle_path"]}, READ_ONLY, tool_get_particle_info)
-    registry.register("get_character_sockets", "Particles", "Retrieves sockets from a character's SkeletalMeshComponent.", {"type": "object", "properties": {"actor": {"type": "string"}}, "required": ["actor"]}, READ_ONLY, tool_get_character_sockets)
-    registry.register("preview_particle_on_actor", "Particles", "Attaches a preview particle system to an actor or socket.", {"type": "object", "properties": {"actor": {"type": "string"}, "particle_path": {"type": "string"}, "socket_name": {"type": "string"}}, "required": ["actor", "particle_path"]}, SAFE_WRITE, tool_preview_particle_on_actor)
-    registry.register("remove_preview_particle", "Particles", "Removes preview particle components from an actor.", {"type": "object", "properties": {"actor": {"type": "string"}}, "required": ["actor"]}, SAFE_WRITE, tool_remove_preview_particle)
+    registry.register("find_particle_systems", "Particles", "Searches for Niagara and Cascade particles.", {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Substring to search in particle system name"},
+            "type": {"type": "string", "description": "'Niagara', 'Cascade', or 'All' (default: 'All')"},
+            "path": {"type": "string", "description": "Search package directory"}
+        }
+    }, READ_ONLY, tool_find_particle_systems)
+    registry.register("get_particle_info", "Particles", "Returns particle system details.", {
+        "type": "object",
+        "properties": {
+            "particle_path": {"type": "string", "description": "Object path of the particle system"}
+        },
+        "required": ["particle_path"]
+    }, READ_ONLY, tool_get_particle_info)
+    registry.register("get_character_sockets", "Particles", "Retrieves sockets from a character's SkeletalMeshComponent.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Actor label or name"}
+        },
+        "required": ["actor"]
+    }, READ_ONLY, tool_get_character_sockets)
+    registry.register("preview_particle_on_actor", "Particles", "Attaches a preview particle system to an actor or socket.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Target actor label or name"},
+            "particle_path": {"type": "string", "description": "Object path of the particle system"},
+            "socket_name": {"type": "string", "description": "Socket name to attach to (e.g. 'Hand_R', or Root if omitted)"}
+        },
+        "required": ["actor", "particle_path"]
+    }, SAFE_WRITE, tool_preview_particle_on_actor)
+    registry.register("remove_preview_particle", "Particles", "Removes preview particle components from an actor.", {
+        "type": "object",
+        "properties": {
+            "actor": {"type": "string", "description": "Target actor label or name"}
+        },
+        "required": ["actor"]
+    }, SAFE_WRITE, tool_remove_preview_particle)
 
     # Conan Exiles
-    registry.register("find_conan_assets", "Conan", "Searches assets in /Game/ and /ConanSandbox/.", {"type": "object", "properties": {"query": {"type": "string"}, "class_name": {"type": "string"}}}, READ_ONLY, tool_find_conan_assets)
-    registry.register("find_conan_datatables", "Conan", "Searches Conan gameplay, item, recipe, and spawn tables.", {"type": "object", "properties": {"query": {"type": "string"}}}, READ_ONLY, tool_find_conan_datatables)
-    registry.register("find_conan_characters", "Conan", "Finds Conan character blueprints, monsters, and thralls.", {"type": "object", "properties": {"query": {"type": "string"}}}, READ_ONLY, tool_find_conan_characters)
-    registry.register("find_conan_items", "Conan", "Finds Conan weapons, armor, and item assets.", {"type": "object", "properties": {"query": {"type": "string"}}}, READ_ONLY, tool_find_conan_items)
-    registry.register("find_conan_particles", "Conan", "Searches Conan VFX libraries.", {"type": "object", "properties": {"query": {"type": "string"}}}, READ_ONLY, tool_find_conan_particles)
-
-    # Scripting / Game Thread Execution
-    def tool_execute_python(args):
-        code = args.get("code", "").strip()
-        if not code:
-            raise ValueError("Parameter 'code' is required")
-        import io
-        import contextlib
-        import traceback
-        stdout_capture = io.StringIO()
-        stderr_capture = io.StringIO()
-        env = {
-            "unreal": unreal,
-            "registry": registry,
-            "__name__": "__main__"
+    registry.register("find_conan_assets", "Conan", "Searches assets in /Game/ and /ConanSandbox/.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Substring to search in asset names"},
+            "class_name": {"type": "string", "description": "Optional class name filter (e.g. 'Blueprint', 'StaticMesh')"}
         }
-        success = True
-        error_msg = None
-        result = None
-        with contextlib.redirect_stdout(stdout_capture), contextlib.redirect_stderr(stderr_capture):
-            try:
-                compiled = compile(code, "<mcp_exec>", "exec")
-                exec(compiled, env)
-                if "_result" in env:
-                    result = env["_result"]
-            except Exception as e:
-                success = False
-                error_msg = f"{e}\n{traceback.format_exc()}"
-        return {
-            "success": success,
-            "stdout": stdout_capture.getvalue(),
-            "stderr": stderr_capture.getvalue(),
-            "result": str(result) if result is not None else None,
-            "error": error_msg
+    }, READ_ONLY, tool_find_conan_assets)
+    registry.register("find_conan_datatables", "Conan", "Searches Conan gameplay, item, recipe, and spawn tables.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Substring to search in DataTable names"}
         }
+    }, READ_ONLY, tool_find_conan_datatables)
+    registry.register("find_conan_characters", "Conan", "Finds Conan character blueprints, monsters, and thralls.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Substring to search in Character names"}
+        }
+    }, READ_ONLY, tool_find_conan_characters)
+    registry.register("find_conan_items", "Conan", "Finds Conan weapons, armor, and item assets.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Substring to search in Item names"}
+        }
+    }, READ_ONLY, tool_find_conan_items)
+    registry.register("find_conan_particles", "Conan", "Searches Conan VFX libraries.", {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Substring to search in VFX names"}
+        }
+    }, READ_ONLY, tool_find_conan_particles)
 
-    registry.register("execute_python", "Scripting", "Executes arbitrary Python code synchronously on the Unreal Game Thread.", {"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]}, SAFE_WRITE, tool_execute_python)
+    # Scripting
+    registry.register("execute_python", "Scripting", "Executes arbitrary Python code synchronously on the Unreal Game Thread.", {
+        "type": "object",
+        "properties": {
+            "code": {"type": "string", "description": "Valid Python 3 script to execute"}
+        },
+        "required": ["code"]
+    }, SAFE_WRITE, tool_execute_python)
 
     # Management
-    def tool_reload_server(args):
-        import importlib
-        import conan_mcp_server
-        importlib.reload(conan_mcp_server)
-        return {"reloaded": True, "tools_count": len(registry.tools)}
-
-    registry.register("reload_server", "Editor", "Hot-reloads the ConanMCP python server module.", {"type": "object", "properties": {}}, SAFE_WRITE, tool_reload_server)
+    registry.register("reload_server", "Editor", "Hot-reloads the ConanMCP python server module, tools, resources and prompts.", {"type": "object", "properties": {}}, SAFE_WRITE, tool_reload_server)
 
     log_info(f"Registered {len(registry.tools)} tools for ConanMCP")
 
 
+def register_all_resources():
+    resource_registry.clear()
+    resource_registry.register(
+        uri="devkit://status",
+        name="DevKit Status",
+        mime_type="application/json",
+        description="Live editor status, engine version, active level, and dirty package status.",
+        handler=resource_devkit_status
+    )
+    resource_registry.register(
+        uri="devkit://logs/recent",
+        name="Recent DevKit Logs",
+        mime_type="text/plain",
+        description="Ring buffer of the latest Output Log entries recorded by ConanMCP.",
+        handler=resource_devkit_logs
+    )
+    resource_registry.register(
+        uri="devkit://outliner",
+        name="Level World Outliner",
+        mime_type="application/json",
+        description="Structured hierarchical list of all actors in the currently loaded level.",
+        handler=resource_devkit_outliner
+    )
+    resource_registry.register(
+        uri="conan://tables",
+        name="Conan DataTables Catalog",
+        mime_type="application/json",
+        description="Catalog of all Conan Exiles item, recipe, spawn, and gameplay DataTables.",
+        handler=resource_conan_tables
+    )
+    resource_registry.register_template(
+        uri_template="conan://asset/{package_path}",
+        name="Conan Asset Inspector",
+        mime_type="application/json",
+        description="Inspect metadata, class, dependencies, and referencers of any asset by package path.",
+        handler=resource_template_conan_asset
+    )
+    log_info(f"Registered {len(resource_registry.resources)} resources and {len(resource_registry.templates)} templates for ConanMCP")
+
+
+def register_all_prompts():
+    prompt_registry.clear()
+    prompt_registry.register(
+        name="create-conan-item-mod",
+        description="Step-by-step workflow to design, create, and configure a new item, weapon, or armor in Conan Exiles DevKit.",
+        arguments=[
+            {"name": "item_name", "description": "Name of the new item", "required": True},
+            {"name": "item_type", "description": "Type of item (Weapon, Armor, Placeable, Consumable)", "required": False},
+            {"name": "description", "description": "Brief description of the item's purpose and appearance", "required": False}
+        ],
+        handler=prompt_create_conan_item
+    )
+    prompt_registry.register(
+        name="audit-level-performance",
+        description="Analyzes the active level for performance bottlenecks, unbatched actors, excessive dynamic lights, and particle previews.",
+        arguments=[],
+        handler=prompt_audit_level_performance
+    )
+    prompt_registry.register(
+        name="inspect-character-skeleton",
+        description="Inspects bone hierarchy, socket attach points, and attachment compatibility for character and thrall skeletal meshes.",
+        arguments=[
+            {"name": "mesh_path", "description": "Object path of the SkeletalMesh", "required": False}
+        ],
+        handler=prompt_inspect_character_skeleton
+    )
+    prompt_registry.register(
+        name="debug-niagara-vfx",
+        description="Diagnoses, searches, and previews Niagara and Cascade particle systems on level actors or character sockets.",
+        arguments=[
+            {"name": "vfx_query", "description": "Keyword to search particle libraries (e.g. Fire, Blood, Sandstorm)", "required": False}
+        ],
+        handler=prompt_debug_niagara_vfx
+    )
+    log_info(f"Registered {len(prompt_registry.prompts)} prompts for ConanMCP")
+
+
 # =============================================================================
-# HTTP & JSON-RPC 2.0 REQUEST HANDLER
+# JSON-RPC 2.0 PROTOCOL ENGINE
 # =============================================================================
 
+def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
+    """Processes a single JSON-RPC 2.0 request or notification according to MCP specification."""
+    global _request_counter, _error_counter
+    _request_counter += 1
+
+    if not isinstance(req, dict):
+        _error_counter += 1
+        return {
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32600, "message": "Invalid Request: expected JSON object"}
+        }
+
+    req_id = req.get("id")
+    method = req.get("method")
+    params = req.get("params", {})
+
+    if not method:
+        _error_counter += 1
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32600, "message": "Invalid Request: missing 'method' field"}
+        }
+
+    # Notifications MUST NOT receive any response in JSON-RPC 2.0
+    if method == "notifications/initialized":
+        log_info("MCP Client initialized")
+        return None
+    elif method == "notifications/cancelled":
+        log_warning(f"Client cancelled request: {params.get('requestId')}")
+        return None
+    elif method.startswith("notifications/"):
+        return None
+
+    # MCP Lifecycle & Ping
+    if method == "initialize":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": {
+                    "name": "conan-devkit-mcp",
+                    "version": "1.1.0"
+                },
+                "capabilities": {
+                    "tools": {"listChanged": True},
+                    "resources": {"subscribe": True, "listChanged": True},
+                    "prompts": {"listChanged": True},
+                    "logging": {}
+                }
+            }
+        }
+    elif method == "ping":
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+    elif method == "logging/setLevel":
+        level = params.get("level", "info")
+        log_info(f"Logging level set to: {level}")
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+
+    # Management
+    elif method == "conan/reload":
+        import importlib
+        import conan_mcp_server
+        importlib.reload(conan_mcp_server)
+        conan_mcp_server.register_all_tools()
+        conan_mcp_server.register_all_resources()
+        conan_mcp_server.register_all_prompts()
+        conan_mcp_server.ensure_ticker_registered()
+        sse_manager.broadcast_notification("notifications/tools/list_changed", {})
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "reloaded": True,
+                "tools_count": len(conan_mcp_server.registry.tools),
+                "resources_count": len(conan_mcp_server.resource_registry.resources),
+                "prompts_count": len(conan_mcp_server.prompt_registry.prompts)
+            }
+        }
+
+    # Tools
+    elif method == "tools/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "tools": registry.list_tools_schema()
+            }
+        }
+    elif method == "tools/call":
+        tool_name = params.get("name")
+        tool_args = params.get("arguments", {})
+
+        tool_def = registry.get_tool(tool_name)
+        if not tool_def:
+            _error_counter += 1
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32601, "message": f"Tool '{tool_name}' not found"}
+            }
+
+        # Security enforcement
+        sec = tool_def["security"]
+        if sec == SAFE_WRITE and not ENABLE_WRITE_TOOLS:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": "Security error: SAFE_WRITE tools are disabled"}],
+                    "isError": True
+                }
+            }
+        if sec == DESTRUCTIVE and not ENABLE_DESTRUCTIVE_TOOLS:
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [{"type": "text", "text": "Security error: DESTRUCTIVE tools are disabled"}],
+                    "isError": True
+                }
+            }
+
+        start_t = time.time()
+        log_info(f"Tool called: {tool_name}")
+
+        try:
+            result_data = execute_on_game_thread(tool_def["handler"], tool_args)
+            elapsed_ms = (time.time() - start_t) * 1000.0
+            log_info(f"Tool completed in {elapsed_ms:.1f} ms")
+
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {"type": "text", "text": json.dumps(result_data, indent=2) if not isinstance(result_data, str) else result_data}
+                    ],
+                    "isError": False
+                }
+            }
+        except Exception as e:
+            _error_counter += 1
+            log_error(f"Tool error in '{tool_name}': {str(e)}")
+            # MCP spec requires CallToolResult with isError: true for tool execution errors
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "content": [
+                        {"type": "text", "text": f"Error executing tool '{tool_name}': {str(e)}"}
+                    ],
+                    "isError": True
+                }
+            }
+
+    # Resources
+    elif method == "resources/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "resources": resource_registry.list_resources_schema()
+            }
+        }
+    elif method == "resources/templates/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "resourceTemplates": resource_registry.list_templates_schema()
+            }
+        }
+    elif method == "resources/read":
+        uri = params.get("uri")
+        if not uri:
+            _error_counter += 1
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Missing 'uri' parameter for resources/read"}
+            }
+        try:
+            item = resource_registry.read_resource(uri)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": {
+                    "contents": [item]
+                }
+            }
+        except Exception as e:
+            _error_counter += 1
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32002, "message": f"Resource error: {str(e)}"}
+            }
+    elif method == "resources/subscribe":
+        uri = params.get("uri")
+        if uri:
+            resource_registry.subscriptions.add(uri)
+        return {"jsonrpc": "2.0", "id": req_id, "result": {}}
+
+    # Prompts
+    elif method == "prompts/list":
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "result": {
+                "prompts": prompt_registry.list_prompts_schema()
+            }
+        }
+    elif method == "prompts/get":
+        name = params.get("name")
+        arguments = params.get("arguments", {})
+        if not name:
+            _error_counter += 1
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": "Missing 'name' parameter for prompts/get"}
+            }
+        try:
+            res = prompt_registry.get_prompt(name, arguments)
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "result": res
+            }
+        except Exception as e:
+            _error_counter += 1
+            return {
+                "jsonrpc": "2.0",
+                "id": req_id,
+                "error": {"code": -32602, "message": f"Prompt error: {str(e)}"}
+            }
+
+    else:
+        _error_counter += 1
+        return {
+            "jsonrpc": "2.0",
+            "id": req_id,
+            "error": {"code": -32601, "message": f"Method '{method}' not found"}
+        }
+
+def process_json_rpc(raw_json: str) -> Optional[str]:
+    """Parses JSON input and routes single or batch requests."""
+    try:
+        parsed = json.loads(raw_json)
+    except Exception as e:
+        return json.dumps({
+            "jsonrpc": "2.0",
+            "id": None,
+            "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
+        })
+
+    if isinstance(parsed, list):
+        responses = []
+        for req in parsed:
+            resp = process_single_request(req)
+            if resp is not None:
+                responses.append(resp)
+        return json.dumps(responses) if responses else None
+    else:
+        resp = process_single_request(parsed)
+        return json.dumps(resp) if resp is not None else None
+
+
+# =============================================================================
+# HTTP & SSE REQUEST HANDLER
+# =============================================================================
+
+_server_running = True
+
 class ConanMCPRequestHandler(BaseHTTPRequestHandler):
+    def handle(self):
+        try:
+            super().handle()
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError, socket.error):
+            pass
+
     def log_message(self, format, *args):
         # Suppress default noisy access logs
         pass
+
+    def check_security(self) -> bool:
+        # 1. Host header validation against DNS rebinding
+        host = self.headers.get("Host", "")
+        if host:
+            host_name = host.split(":")[0].lower()
+            if host_name not in ["127.0.0.1", "localhost", "[::1]", ""]:
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "error": "Forbidden: Host header blocked for localhost security (Anti-DNS Rebinding)"
+                }).encode("utf-8"))
+                return False
+
+        # 2. Bearer token validation if configured
+        if CONAN_MCP_TOKEN:
+            auth_header = self.headers.get("Authorization", "")
+            if auth_header != f"Bearer {CONAN_MCP_TOKEN}":
+                self.send_response(401)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps({
+                    "error": "Unauthorized: Valid Authorization Bearer token required"
+                }).encode("utf-8"))
+                return False
+
+        return True
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -1103,142 +2189,83 @@ class ConanMCPRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self):
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        body = json.dumps({
-            "service": "ConanMCP",
-            "version": "1.0.0",
-            "protocol": "MCP / JSON-RPC 2.0",
-            "status": "running",
-            "registered_tools": len(registry.tools)
-        })
-        self.wfile.write(body.encode("utf-8"))
+        if not self.check_security():
+            return
+
+        path = self.path.split("?")[0]
+
+        # Standard MCP Server-Sent Events (SSE) Transport
+        if path == "/sse":
+            session_id = sse_manager.create_session()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "keep-alive")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+
+            # MCP SSE Handshake: send initial endpoint event
+            endpoint_event = f"event: endpoint\ndata: /messages?sessionId={session_id}\n\n"
+            self.wfile.write(endpoint_event.encode("utf-8"))
+            self.wfile.flush()
+
+            session_queue = sse_manager.sessions.get(session_id)
+            try:
+                while _server_running and session_id in sse_manager.sessions:
+                    try:
+                        msg = session_queue.get(timeout=2.0)
+                        evt = f"event: message\ndata: {msg}\n\n"
+                        self.wfile.write(evt.encode("utf-8"))
+                        self.wfile.flush()
+                    except queue.Empty:
+                        self.wfile.write(b": keepalive\n\n")
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError, socket.error):
+                pass
+            finally:
+                sse_manager.remove_session(session_id)
+            return
+
+        elif path in [ENDPOINT_PATH, "/", "/health", "/status"]:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            body = json.dumps({
+                "service": "ConanMCP",
+                "version": "1.1.0",
+                "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
+                "status": "running",
+                "registered_tools": len(registry.tools),
+                "registered_resources": len(resource_registry.resources),
+                "registered_resource_templates": len(resource_registry.templates),
+                "registered_prompts": len(prompt_registry.prompts),
+                "sse_endpoint": "/sse",
+                "messages_endpoint": "/messages"
+            })
+            self.wfile.write(body.encode("utf-8"))
+        else:
+            self.send_error(404, f"Endpoint '{self.path}' not found")
 
     def do_POST(self):
+        if not self.check_security():
+            return
+
         content_length = int(self.headers.get("Content-Length", 0))
         raw_body = self.rfile.read(content_length).decode("utf-8")
 
-        response_body = self.process_json_rpc(raw_body)
+        response_body = process_json_rpc(raw_body)
 
-        self.send_response(200)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.end_headers()
-        self.wfile.write(response_body.encode("utf-8"))
-
-    def process_json_rpc(self, raw_json: str) -> str:
-        try:
-            req = json.loads(raw_json)
-        except Exception as e:
-            return json.dumps({
-                "jsonrpc": "2.0",
-                "id": None,
-                "error": {"code": -32700, "message": f"Parse error: {str(e)}"}
-            })
-
-        req_id = req.get("id")
-        method = req.get("method")
-        params = req.get("params", {})
-
-        if method == "initialize":
-            return json.dumps({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "protocolVersion": "2024-11-05",
-                    "serverInfo": {
-                        "name": "conan-devkit-mcp",
-                        "version": "1.0.0"
-                    },
-                    "capabilities": {
-                        "tools": {"listChanged": False}
-                    }
-                }
-            })
-        elif method == "conan/reload":
-            import importlib
-            import conan_mcp_server
-            importlib.reload(conan_mcp_server)
-            conan_mcp_server.register_all_tools()
-            conan_mcp_server.ensure_ticker_registered()
-            return json.dumps({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {"reloaded": True, "tools_count": len(conan_mcp_server.registry.tools)}
-            })
-        elif method == "notifications/initialized":
-            log_info("Client initialized")
-            return json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {}})
-        elif method == "ping":
-            return json.dumps({"jsonrpc": "2.0", "id": req_id, "result": {}})
-        elif method == "tools/list":
-            return json.dumps({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "result": {
-                    "tools": registry.list_tools_schema()
-                }
-            })
-        elif method == "tools/call":
-            tool_name = params.get("name")
-            tool_args = params.get("arguments", {})
-
-            tool_def = registry.get_tool(tool_name)
-            if not tool_def:
-                return json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32601, "message": f"Tool '{tool_name}' not found"}
-                })
-
-            # Security level check
-            sec = tool_def["security"]
-            if sec == SAFE_WRITE and not ENABLE_WRITE_TOOLS:
-                return json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32000, "message": "Security violation: SAFE_WRITE tools are disabled"}
-                })
-            if sec == DESTRUCTIVE and not ENABLE_DESTRUCTIVE_TOOLS:
-                return json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32000, "message": "Security violation: DESTRUCTIVE tools are disabled"}
-                })
-
-            start_t = time.time()
-            log_info(f"Tool called: {tool_name}")
-
-            try:
-                result_data = execute_on_game_thread(tool_def["handler"], tool_args)
-                elapsed_ms = (time.time() - start_t) * 1000.0
-                log_info(f"Tool completed in {elapsed_ms:.1f} ms")
-
-                return json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "result": {
-                        "content": [
-                            {"type": "text", "text": json.dumps(result_data, indent=2)}
-                        ],
-                        "isError": False
-                    }
-                })
-            except Exception as e:
-                log_error(f"Tool error in '{tool_name}': {str(e)}")
-                return json.dumps({
-                    "jsonrpc": "2.0",
-                    "id": req_id,
-                    "error": {"code": -32603, "message": str(e)}
-                })
+        if response_body is None or response_body == "":
+            self.send_response(204)  # No Content for notifications
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
         else:
-            return json.dumps({
-                "jsonrpc": "2.0",
-                "id": req_id,
-                "error": {"code": -32601, "message": f"Method '{method}' not found"}
-            })
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            self.wfile.write(response_body.encode("utf-8"))
 
 
 # =============================================================================
@@ -1253,14 +2280,19 @@ class ConanMCPServerThread(threading.Thread):
         self.httpd = None
 
     def run(self):
+        global _server_running
+        _server_running = True
         try:
-            self.httpd = HTTPServer((self.host, self.port), ConanMCPRequestHandler)
-            log_info(f"MCP server started on {self.host}:{self.port} (Endpoint: {ENDPOINT_PATH})")
+            self.httpd = ThreadingHTTPServer((self.host, self.port), ConanMCPRequestHandler)
+            self.httpd.daemon_threads = True
+            log_info(f"MCP server started on {self.host}:{self.port} (Endpoints: {ENDPOINT_PATH}, /sse, /messages)")
             self.httpd.serve_forever()
         except Exception as e:
             log_error(f"Failed to start server on {self.host}:{self.port}: {str(e)}")
 
     def stop(self):
+        global _server_running
+        _server_running = False
         if self.httpd:
             self.httpd.shutdown()
             self.httpd.server_close()
@@ -1275,6 +2307,8 @@ def start_server(host=BIND_ADDRESS, port=DEFAULT_PORT):
         log_warning("MCP server is already running")
         return
     register_all_tools()
+    register_all_resources()
+    register_all_prompts()
     ensure_ticker_registered()
     _server_instance = ConanMCPServerThread(host, port)
     _server_instance.start()
@@ -1299,7 +2333,9 @@ def get_server_status():
         "running": is_running,
         "host": _server_instance.host if is_running else None,
         "port": _server_instance.port if is_running else None,
-        "tools_registered": len(registry.tools)
+        "tools_registered": len(registry.tools),
+        "resources_registered": len(resource_registry.resources),
+        "prompts_registered": len(prompt_registry.prompts)
     }
     if unreal:
         unreal.log(f"LogConanMCP Status: {status_info}")
@@ -1307,7 +2343,8 @@ def get_server_status():
         print(f"[ConanMCP Status] {status_info}")
     return status_info
 
-# Initialize tools on import
+# Initialize tools, resources, and prompts on import
 register_all_tools()
+register_all_resources()
+register_all_prompts()
 ensure_ticker_registered()
-

@@ -15,14 +15,14 @@ Añade la siguiente definición a la configuración de MCP de tu agente o en el 
 {
   "mcpServers": {
     "conan-devkit": {
-      "url": "http://127.0.0.1:8123/mcp",
-      "transport": "http"
+      "url": "http://127.0.0.1:8123/sse"
     }
   }
 }
 ```
+*(También se soporta `"url": "http://127.0.0.1:8123/mcp"` para transporte HTTP POST clásico)*
 
-Una vez configurado, Antigravity descubrirá automáticamente las 38 herramientas del Conan DevKit y las tendrá disponibles durante las sesiones de pair programming.
+Una vez configurado, Antigravity descubrirá automáticamente las **46 herramientas**, los **Recursos** (`devkit://status`, `devkit://logs/recent`, etc.) y los **Prompts** del Conan DevKit.
 
 ---
 
@@ -36,8 +36,8 @@ Cursor cuenta con soporte nativo para Model Context Protocol (MCP) en su versió
 3. Haz clic en **Add New MCP Server**.
 4. Rellena los datos:
    - **Name:** `ConanDevKit`
-   - **Type:** `HTTP` o `SSE`
-   - **URL:** `http://127.0.0.1:8123/mcp`
+   - **Type:** `SSE` o `HTTP`
+   - **URL:** `http://127.0.0.1:8123/sse`
 
 ### Configuración mediante `mcp.json`
 Si configuras el archivo de configuración de MCP directamente (por ejemplo en `.cursor/mcp.json` o en la configuración global de Cursor):
@@ -46,7 +46,7 @@ Si configuras el archivo de configuración de MCP directamente (por ejemplo en `
 {
   "mcpServers": {
     "conan-devkit": {
-      "url": "http://127.0.0.1:8123/mcp"
+      "url": "http://127.0.0.1:8123/sse"
     }
   }
 }

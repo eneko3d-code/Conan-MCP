@@ -619,3 +619,68 @@ El plugin **ConanMCP** expone un catálogo de **38 herramientas** agrupadas en 8
     }
   }
   ```
+
+---
+
+## 9. Diagnósticos y Scripting del MCP
+
+### `get_mcp_diagnostics`
+- **Categoría:** Editor
+- **Seguridad:** `READ_ONLY`
+- **Descripción:** Proporciona telemetría interna del servidor MCP: versión del protocolo (2024-11-05), tiempo de actividad (uptime), contador total de peticiones y errores, sesiones SSE activas, cola de ejecución en el Game Thread y número de herramientas/recursos/prompts registrados.
+- **Esquema de Entrada:**
+  ```json
+  { "type": "object", "properties": {} }
+  ```
+
+### `execute_python`
+- **Categoría:** Scripting
+- **Seguridad:** `SAFE_WRITE`
+- **Descripción:** Ejecuta código Python arbitrario de forma síncrona en el Game Thread de Unreal Engine, capturando `stdout`, `stderr` y resultados evaluados.
+- **Esquema de Entrada:**
+  ```json
+  {
+    "type": "object",
+    "properties": {
+      "code": { "type": "string", "description": "Código Python 3 a ejecutar" }
+    },
+    "required": ["code"]
+  }
+  ```
+
+### `reload_server`
+- **Categoría:** Editor
+- **Seguridad:** `SAFE_WRITE`
+- **Descripción:** Recarga en caliente el servidor Python y re-registra dinámicamente todas las herramientas, recursos y prompts sin reiniciar el Unreal DevKit.
+- **Esquema de Entrada:**
+  ```json
+  { "type": "object", "properties": {} }
+  ```
+
+---
+
+## 10. Primitivas MCP: Recursos (`resources/read`)
+
+Los clientes MCP (Claude Desktop, Cursor, Google Antigravity) pueden inspeccionar el estado del editor sin necesidad de ejecutar herramientas:
+
+| URI del Recurso | Tipo MIME | Descripción |
+|---|---|---|
+| `devkit://status` | `application/json` | Estado operativo del DevKit, mundo actual, actores en escena, dirty status y métricas de servidor. |
+| `devkit://logs/recent` | `text/plain` | Búfer circular en memoria con los últimos 200 mensajes del Output Log de Unreal Engine. |
+| `devkit://outliner` | `application/json` | Jerarquía y lista de actores en el nivel activo con clase, etiquetas y visibilidad. |
+| `conan://tables` | `application/json` | Catálogo de DataTables de Conan Exiles (/Game y /ConanSandbox). |
+| `conan://asset/{package_path}` | `application/json` | Plantilla dinámica (Resource Template) para inspeccionar metadatos y dependencias de cualquier asset. |
+
+---
+
+## 11. Primitivas MCP: Prompts (`prompts/get`)
+
+Flujos guiados preconfigurados accesibles directamente desde el menú de prompts del asistente:
+
+| Nombre del Prompt | Argumentos | Propósito |
+|---|---|---|
+| `create-conan-item-mod` | `item_name`, `item_type`, `description` | Guía completa paso a paso para crear, configurar y registrar un nuevo ítem/arma en Conan DevKit. |
+| `audit-level-performance` | N/A | Instrucciones estructuradas para auditar densidad de actores, luces dinámicas y optimización de escena. |
+| `inspect-character-skeleton` | `mesh_path` | Flujo para analizar jerarquías de huesos, sockets de armas y puntos de anclaje de armaduras/thralls. |
+| `debug-niagara-vfx` | `vfx_query` | Guía para localizar sistemas Niagara/Cascade y previsualizarlos en sockets de personajes. |
+
