@@ -12,7 +12,9 @@ import socket
 import threading
 import queue
 import uuid
+import hmac
 import collections
+import urllib.parse
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from typing import Dict, Any, List, Optional, Union
 
@@ -38,9 +40,19 @@ CONAN_MCP_TOKEN = os.environ.get("CONAN_MCP_TOKEN", "")
 
 # Security flags
 ENABLE_WRITE_TOOLS = os.environ.get("CONAN_MCP_READONLY", "0") != "1"
-ENABLE_DESTRUCTIVE_TOOLS = False
+# Destructive tools (e.g. execute_python) are opt-in: set CONAN_MCP_ENABLE_DESTRUCTIVE=1
+ENABLE_DESTRUCTIVE_TOOLS = os.environ.get("CONAN_MCP_ENABLE_DESTRUCTIVE", "0") == "1"
 ENABLE_LOGGING = True
 MAX_RESULTS = 50
+
+# Maximum seconds a tool may wait for the Game Thread (matches docs/security.md)
+TOOL_TIMEOUT_SECONDS = float(os.environ.get("CONAN_MCP_TIMEOUT", 30))
+# Maximum accepted HTTP request body (bytes)
+MAX_REQUEST_BODY_BYTES = 1024 * 1024
+# Package roots that tools are allowed to touch
+ALLOWED_PACKAGE_ROOTS = ("/Game", "/Engine", "/ConanSandbox")
+# Hosts allowed in the Host / Origin headers (anti DNS-rebinding / anti browser CSRF)
+ALLOWED_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 
 # Security levels
 READ_ONLY = "READ_ONLY"
@@ -48,10 +60,88 @@ SAFE_WRITE = "SAFE_WRITE"
 DESTRUCTIVE = "DESTRUCTIVE"
 
 # Telemetry & Diagnostics Counters
-_server_start_time = time.time()
-_request_counter = 0
-_error_counter = 0
-_recent_logs_buffer = collections.deque(maxlen=200)
+# importlib.reload() re-executes this module in the same namespace, so runtime state
+# is carried over via globals().get(...) instead of being reset by a hot reload.
+_server_start_time = globals().get("_server_start_time", time.time())
+_request_counter = globals().get("_request_counter", 0)
+_error_counter = globals().get("_error_counter", 0)
+_counter_lock = globals().get("_counter_lock", threading.Lock())
+_recent_logs_buffer = globals().get("_recent_logs_buffer", collections.deque(maxlen=200))
+
+
+def _count_request():
+    global _request_counter
+    with _counter_lock:
+        _request_counter += 1
+
+
+def _count_error():
+    global _error_counter
+    with _counter_lock:
+        _error_counter += 1
+
+
+def validate_package_path(value: str, arg_name: str = "path") -> None:
+    """Rejects package/asset paths outside the allowed roots or containing traversal sequences."""
+    if not isinstance(value, str) or not value:
+        return
+    if ".." in value or "\\" in value or "//" in value or "\0" in value:
+        raise ValueError(f"Invalid '{arg_name}': traversal sequences are not allowed")
+    if not any(value == root or value.startswith(root + "/") for root in ALLOWED_PACKAGE_ROOTS):
+        raise ValueError(
+            f"Invalid '{arg_name}': must start with one of {', '.join(ALLOWED_PACKAGE_ROOTS)}"
+        )
+
+
+_PATH_ARG_NAMES = ("package_path", "asset_path", "path")
+
+
+_JSON_TYPES = {
+    "string": (str,),
+    "integer": (int,),
+    "number": (int, float),
+    "boolean": (bool,),
+    "array": (list,),
+    "object": (dict,),
+}
+
+
+def validate_against_schema(args: dict, schema: Optional[dict]) -> None:
+    """Minimal JSON-Schema check: required fields, primitive types, enum, min/max."""
+    if not schema:
+        return
+    props = schema.get("properties", {})
+    for name in schema.get("required", []):
+        if name not in args or args[name] is None:
+            raise ValueError(f"Missing required argument '{name}'")
+    for name, value in args.items():
+        spec = props.get(name)
+        if not spec or value is None:
+            continue
+        expected = spec.get("type")
+        if expected in _JSON_TYPES:
+            ok = isinstance(value, _JSON_TYPES[expected])
+            if expected in ("integer", "number") and isinstance(value, bool):
+                ok = False  # bool is an int subclass in Python
+            if not ok:
+                raise ValueError(f"Argument '{name}' must be of type {expected}")
+        if "enum" in spec and value not in spec["enum"]:
+            raise ValueError(f"Argument '{name}' must be one of {spec['enum']}")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if "minimum" in spec and value < spec["minimum"]:
+                raise ValueError(f"Argument '{name}' must be >= {spec['minimum']}")
+            if "maximum" in spec and value > spec["maximum"]:
+                raise ValueError(f"Argument '{name}' must be <= {spec['maximum']}")
+
+
+def validate_tool_arguments(args: Any, schema: Optional[dict] = None) -> None:
+    """Validates a tool call's arguments (schema + path-like values) before it reaches the engine."""
+    if not isinstance(args, dict):
+        raise ValueError("'arguments' must be a JSON object")
+    validate_against_schema(args, schema)
+    for key in _PATH_ARG_NAMES:
+        if key in args:
+            validate_package_path(str(args[key]).strip(), key)
 
 
 # =============================================================================
@@ -75,6 +165,10 @@ class SSESessionManager:
             if session_id in self.sessions:
                 del self.sessions[session_id]
 
+    def has_session(self, session_id: str) -> bool:
+        with self.lock:
+            return session_id in self.sessions
+
     def broadcast_notification(self, method: str, params: dict):
         msg = json.dumps({"jsonrpc": "2.0", "method": method, "params": params})
         with self.lock:
@@ -92,7 +186,7 @@ class SSESessionManager:
                 except queue.Full:
                     pass
 
-sse_manager = SSESessionManager()
+sse_manager = globals().get("sse_manager") or SSESessionManager()
 
 
 def _append_log(level: str, msg: str):
@@ -134,9 +228,9 @@ def log_error(msg: str):
 # We register an engine ticker callback that drains tasks queued by the HTTP worker thread.
 # =============================================================================
 
-_game_thread_queue = queue.Queue()
-_ticker_handle = None
-_ticker_lock = threading.Lock()
+_game_thread_queue = globals().get("_game_thread_queue") or queue.Queue()
+_ticker_handle = globals().get("_ticker_handle")
+_ticker_lock = globals().get("_ticker_lock") or threading.Lock()
 
 def _game_thread_ticker(delta_time: float) -> bool:
     """Processes queued tasks on the Unreal Engine Game Thread."""
@@ -147,6 +241,10 @@ def _game_thread_ticker(delta_time: float) -> bool:
             break
 
         fn, args, kwargs, result_holder, done_event = task
+        if result_holder.get("cancelled"):
+            # The caller already timed out; do not run stale work later.
+            done_event.set()
+            continue
         try:
             result_holder["result"] = fn(*args, **kwargs)
             result_holder["error"] = None
@@ -170,20 +268,23 @@ def ensure_ticker_registered():
                 log_error(f"Failed to register Game Thread ticker callback: {e}")
 
 def execute_on_game_thread(fn, *args, **kwargs):
-    """Executes a function synchronously on the Unreal Game Thread with a 30s timeout."""
+    """Executes a function synchronously on the Unreal Game Thread (TOOL_TIMEOUT_SECONDS timeout)."""
     if not unreal:
         return fn(*args, **kwargs)
 
     ensure_ticker_registered()
 
     done_event = threading.Event()
-    result_holder = {"result": None, "error": None}
+    result_holder = {"result": None, "error": None, "cancelled": False}
 
     _game_thread_queue.put((fn, args, kwargs, result_holder, done_event))
 
-    if not done_event.wait(timeout=180.0):
+    if not done_event.wait(timeout=TOOL_TIMEOUT_SECONDS):
+        result_holder["cancelled"] = True  # skip it if it has not started yet
         fn_name = getattr(fn, "__name__", str(fn))
-        raise TimeoutError(f"Execution timed out on Game Thread for '{fn_name}'")
+        raise TimeoutError(
+            f"Execution timed out after {TOOL_TIMEOUT_SECONDS:.0f}s on Game Thread for '{fn_name}'"
+        )
 
     if result_holder["error"] is not None:
         raise result_holder["error"]
@@ -221,7 +322,13 @@ class ToolRegistry:
             result.append({
                 "name": t["name"],
                 "description": t["description"],
-                "inputSchema": t["inputSchema"]
+                "inputSchema": t["inputSchema"],
+                "annotations": {
+                    "readOnlyHint": t["security"] == READ_ONLY,
+                    "destructiveHint": t["security"] == DESTRUCTIVE,
+                    "idempotentHint": t["security"] == READ_ONLY,
+                    "openWorldHint": False
+                }
             })
         return result
 
@@ -1244,7 +1351,7 @@ def tool_get_mcp_diagnostics(args):
     uptime = round(now - _server_start_time, 2)
     return {
         "mcp_protocol_version": "2024-11-05",
-        "server_version": "1.1.0",
+        "server_version": "1.1.1",
         "service": "ConanMCP",
         "uptime_seconds": uptime,
         "total_requests": _request_counter,
@@ -1259,21 +1366,24 @@ def tool_get_mcp_diagnostics(args):
         "engine_active": unreal is not None
     }
 
-def tool_reload_server(args):
+def reload_server_module() -> dict:
+    """Hot-reloads this module and re-registers tools/resources/prompts (state is preserved)."""
     import importlib
-    import conan_mcp_server
-    importlib.reload(conan_mcp_server)
-    conan_mcp_server.register_all_tools()
-    conan_mcp_server.register_all_resources()
-    conan_mcp_server.register_all_prompts()
-    conan_mcp_server.ensure_ticker_registered()
-    sse_manager.broadcast_notification("notifications/tools/list_changed", {})
+    module = importlib.reload(sys.modules[__name__])
+    module.register_all_tools()
+    module.register_all_resources()
+    module.register_all_prompts()
+    module.ensure_ticker_registered()
+    module.sse_manager.broadcast_notification("notifications/tools/list_changed", {})
     return {
         "reloaded": True,
-        "tools_count": len(conan_mcp_server.registry.tools),
-        "resources_count": len(conan_mcp_server.resource_registry.resources),
-        "prompts_count": len(conan_mcp_server.prompt_registry.prompts)
+        "tools_count": len(module.registry.tools),
+        "resources_count": len(module.resource_registry.resources),
+        "prompts_count": len(module.prompt_registry.prompts)
     }
+
+def tool_reload_server(args):
+    return reload_server_module()
 
 
 # =============================================================================
@@ -1350,6 +1460,10 @@ def resource_conan_tables(uri: str) -> dict:
     return {"tables": tables, "count": len(tables)}
 
 def resource_template_conan_asset(uri: str, package_path: str) -> dict:
+    package_path = urllib.parse.unquote(package_path)
+    if not package_path.startswith("/"):
+        package_path = "/" + package_path
+    validate_package_path(package_path, "package_path")
     if not unreal:
         return {"package_path": package_path, "status": "Mock asset metadata"}
     ar = unreal.AssetRegistryHelpers.get_asset_registry()
@@ -1770,13 +1884,13 @@ def register_all_tools():
     }, READ_ONLY, tool_find_conan_particles)
 
     # Scripting
-    registry.register("execute_python", "Scripting", "Executes arbitrary Python code synchronously on the Unreal Game Thread.", {
+    registry.register("execute_python", "Scripting", "Executes arbitrary Python code synchronously on the Unreal Game Thread. Disabled unless CONAN_MCP_ENABLE_DESTRUCTIVE=1.", {
         "type": "object",
         "properties": {
             "code": {"type": "string", "description": "Valid Python 3 script to execute"}
         },
         "required": ["code"]
-    }, SAFE_WRITE, tool_execute_python)
+    }, DESTRUCTIVE, tool_execute_python)
 
     # Management
     registry.register("reload_server", "Editor", "Hot-reloads the ConanMCP python server module, tools, resources and prompts.", {"type": "object", "properties": {}}, SAFE_WRITE, tool_reload_server)
@@ -1867,11 +1981,10 @@ def register_all_prompts():
 
 def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
     """Processes a single JSON-RPC 2.0 request or notification according to MCP specification."""
-    global _request_counter, _error_counter
-    _request_counter += 1
+    _count_request()
 
     if not isinstance(req, dict):
-        _error_counter += 1
+        _count_error()
         return {
             "jsonrpc": "2.0",
             "id": None,
@@ -1883,7 +1996,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
     params = req.get("params", {})
 
     if not method:
-        _error_counter += 1
+        _count_error()
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -1909,7 +2022,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
                 "protocolVersion": "2024-11-05",
                 "serverInfo": {
                     "name": "conan-devkit-mcp",
-                    "version": "1.1.0"
+                    "version": "1.1.1"
                 },
                 "capabilities": {
                     "tools": {"listChanged": True},
@@ -1928,24 +2041,10 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
 
     # Management
     elif method == "conan/reload":
-        import importlib
-        import conan_mcp_server
-        importlib.reload(conan_mcp_server)
-        conan_mcp_server.register_all_tools()
-        conan_mcp_server.register_all_resources()
-        conan_mcp_server.register_all_prompts()
-        conan_mcp_server.ensure_ticker_registered()
-        sse_manager.broadcast_notification("notifications/tools/list_changed", {})
-        return {
-            "jsonrpc": "2.0",
-            "id": req_id,
-            "result": {
-                "reloaded": True,
-                "tools_count": len(conan_mcp_server.registry.tools),
-                "resources_count": len(conan_mcp_server.resource_registry.resources),
-                "prompts_count": len(conan_mcp_server.prompt_registry.prompts)
-            }
-        }
+        if not ENABLE_WRITE_TOOLS:
+            return {"jsonrpc": "2.0", "id": req_id,
+                    "error": {"code": -32000, "message": "Security error: reload requires SAFE_WRITE tools"}}
+        return {"jsonrpc": "2.0", "id": req_id, "result": execute_on_game_thread(reload_server_module)}
 
     # Tools
     elif method == "tools/list":
@@ -1958,11 +2057,11 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
         }
     elif method == "tools/call":
         tool_name = params.get("name")
-        tool_args = params.get("arguments", {})
+        tool_args = params.get("arguments") or {}
 
         tool_def = registry.get_tool(tool_name)
         if not tool_def:
-            _error_counter += 1
+            _count_error()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -1994,6 +2093,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
         log_info(f"Tool called: {tool_name}")
 
         try:
+            validate_tool_arguments(tool_args, tool_def.get("inputSchema"))
             result_data = execute_on_game_thread(tool_def["handler"], tool_args)
             elapsed_ms = (time.time() - start_t) * 1000.0
             log_info(f"Tool completed in {elapsed_ms:.1f} ms")
@@ -2009,7 +2109,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
                 }
             }
         except Exception as e:
-            _error_counter += 1
+            _count_error()
             log_error(f"Tool error in '{tool_name}': {str(e)}")
             # MCP spec requires CallToolResult with isError: true for tool execution errors
             return {
@@ -2043,7 +2143,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
     elif method == "resources/read":
         uri = params.get("uri")
         if not uri:
-            _error_counter += 1
+            _count_error()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -2059,7 +2159,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
                 }
             }
         except Exception as e:
-            _error_counter += 1
+            _count_error()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -2084,7 +2184,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
         name = params.get("name")
         arguments = params.get("arguments", {})
         if not name:
-            _error_counter += 1
+            _count_error()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -2098,7 +2198,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
                 "result": res
             }
         except Exception as e:
-            _error_counter += 1
+            _count_error()
             return {
                 "jsonrpc": "2.0",
                 "id": req_id,
@@ -2106,7 +2206,7 @@ def process_single_request(req: Any) -> Optional[Dict[str, Any]]:
             }
 
     else:
-        _error_counter += 1
+        _count_error()
         return {
             "jsonrpc": "2.0",
             "id": req_id,
@@ -2140,7 +2240,7 @@ def process_json_rpc(raw_json: str) -> Optional[str]:
 # HTTP & SSE REQUEST HANDLER
 # =============================================================================
 
-_server_running = True
+_server_running = globals().get("_server_running", True)
 
 class ConanMCPRequestHandler(BaseHTTPRequestHandler):
     def handle(self):
@@ -2153,39 +2253,78 @@ class ConanMCPRequestHandler(BaseHTTPRequestHandler):
         # Suppress default noisy access logs
         pass
 
+    def _send_json(self, status: int, payload: Any, extra_headers: Optional[Dict[str, str]] = None):
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self._send_cors_headers()
+        for k, v in (extra_headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(body)
+
+    @staticmethod
+    def _is_local_host(value: str) -> bool:
+        """True if a Host header value or an Origin URL points at the loopback interface."""
+        value = value.strip().lower()
+        if "://" in value:
+            value = value.split("://", 1)[1]
+        value = value.split("/", 1)[0]
+        if value.startswith("["):  # IPv6 literal, e.g. [::1]:8123
+            host = value.split("]", 1)[0] + "]"
+        else:
+            host = value.split(":", 1)[0]
+        return host in ALLOWED_LOCAL_HOSTS
+
+    def _send_cors_headers(self):
+        # Only echo back loopback origins; never a wildcard.
+        origin = self.headers.get("Origin", "")
+        if origin and self._is_local_host(origin):
+            self.send_header("Access-Control-Allow-Origin", origin)
+            self.send_header("Vary", "Origin")
+
     def check_security(self) -> bool:
         # 1. Host header validation against DNS rebinding
         host = self.headers.get("Host", "")
-        if host:
-            host_name = host.split(":")[0].lower()
-            if host_name not in ["127.0.0.1", "localhost", "[::1]", ""]:
-                self.send_response(403)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({
-                    "error": "Forbidden: Host header blocked for localhost security (Anti-DNS Rebinding)"
-                }).encode("utf-8"))
-                return False
+        if host and not self._is_local_host(host):
+            self._send_json(403, {
+                "error": "Forbidden: Host header blocked for localhost security (Anti-DNS Rebinding)"
+            })
+            return False
 
-        # 2. Bearer token validation if configured
+        # 2. Origin validation: browsers always send Origin on cross-site requests.
+        #    Native MCP clients do not send it, so a non-local Origin means a web page is attacking us.
+        origin = self.headers.get("Origin", "")
+        if origin and not self._is_local_host(origin):
+            self._send_json(403, {
+                "error": "Forbidden: cross-origin requests are not allowed"
+            })
+            return False
+
+        # 3. Bearer token validation if configured (constant-time comparison)
         if CONAN_MCP_TOKEN:
             auth_header = self.headers.get("Authorization", "")
-            if auth_header != f"Bearer {CONAN_MCP_TOKEN}":
-                self.send_response(401)
-                self.send_header("Content-Type", "application/json")
-                self.end_headers()
-                self.wfile.write(json.dumps({
+            if not hmac.compare_digest(auth_header, f"Bearer {CONAN_MCP_TOKEN}"):
+                self._send_json(401, {
                     "error": "Unauthorized: Valid Authorization Bearer token required"
-                }).encode("utf-8"))
+                })
                 return False
 
         return True
 
     def do_OPTIONS(self):
-        self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        # CORS preflight: answer only for loopback hosts/origins.
+        host = self.headers.get("Host", "")
+        origin = self.headers.get("Origin", "")
+        if (host and not self._is_local_host(host)) or (origin and not self._is_local_host(origin)):
+            self._send_json(403, {"error": "Forbidden"})
+            return
+        self.send_response(204)
+        self._send_cors_headers()
         self.send_header("Access-Control-Allow-Methods", "POST, GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        self.send_header("Content-Length", "0")
         self.end_headers()
 
     def do_GET(self):
@@ -2201,7 +2340,7 @@ class ConanMCPRequestHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._send_cors_headers()
             self.end_headers()
 
             # MCP SSE Handshake: send initial endpoint event
@@ -2227,13 +2366,9 @@ class ConanMCPRequestHandler(BaseHTTPRequestHandler):
             return
 
         elif path in [ENDPOINT_PATH, "/", "/health", "/status"]:
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            body = json.dumps({
+            body_obj = {
                 "service": "ConanMCP",
-                "version": "1.1.0",
+                "version": "1.1.1",
                 "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
                 "status": "running",
                 "registered_tools": len(registry.tools),
@@ -2242,8 +2377,8 @@ class ConanMCPRequestHandler(BaseHTTPRequestHandler):
                 "registered_prompts": len(prompt_registry.prompts),
                 "sse_endpoint": "/sse",
                 "messages_endpoint": "/messages"
-            })
-            self.wfile.write(body.encode("utf-8"))
+            }
+            self._send_json(200, body_obj)
         else:
             self.send_error(404, f"Endpoint '{self.path}' not found")
 
@@ -2251,21 +2386,76 @@ class ConanMCPRequestHandler(BaseHTTPRequestHandler):
         if not self.check_security():
             return
 
-        content_length = int(self.headers.get("Content-Length", 0))
-        raw_body = self.rfile.read(content_length).decode("utf-8")
+        parsed = urllib.parse.urlparse(self.path)
+        route = parsed.path
 
+        if route not in (ENDPOINT_PATH, "/messages"):
+            self._send_json(404, {"error": f"Endpoint '{route}' not found"})
+            return
+
+        try:
+            content_length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._send_json(400, {"error": "Invalid Content-Length"})
+            return
+        if content_length < 0 or content_length > MAX_REQUEST_BODY_BYTES:
+            self._send_json(413, {"error": f"Request body exceeds {MAX_REQUEST_BODY_BYTES} bytes"})
+            return
+
+        try:
+            raw_body = self.rfile.read(content_length).decode("utf-8")
+        except UnicodeDecodeError:
+            self._send_json(400, {"error": "Request body must be UTF-8"})
+            return
+
+        # SSE transport: POST /messages?sessionId=... -> 202 Accepted, reply travels over the SSE stream.
+        if route == "/messages":
+            session_id = urllib.parse.parse_qs(parsed.query).get("sessionId", [""])[0]
+            if not sse_manager.has_session(session_id):
+                self._send_json(404, {"error": "Unknown or expired sessionId"})
+                return
+            self.send_response(202)
+            self._send_cors_headers()
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            # Tools may take seconds on the Game Thread: do not hold the POST open.
+            threading.Thread(
+                target=_process_sse_message,
+                args=(session_id, raw_body),
+                daemon=True,
+                name="ConanMCP_SSEWorker",
+            ).start()
+            return
+
+        # Streamable HTTP-style transport: reply in the response body.
         response_body = process_json_rpc(raw_body)
-
         if response_body is None or response_body == "":
             self.send_response(204)  # No Content for notifications
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self._send_cors_headers()
             self.end_headers()
         else:
+            payload = response_body.encode("utf-8")
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Content-Length", str(len(payload)))
+            self._send_cors_headers()
             self.end_headers()
-            self.wfile.write(response_body.encode("utf-8"))
+            self.wfile.write(payload)
+
+
+def _process_sse_message(session_id: str, raw_body: str):
+    """Runs a JSON-RPC message and pushes the reply to the client's SSE stream."""
+    try:
+        response_body = process_json_rpc(raw_body)
+    except Exception as e:  # never let a worker thread die silently
+        _count_error()
+        log_error(f"SSE worker failed: {e}")
+        response_body = json.dumps({
+            "jsonrpc": "2.0", "id": None,
+            "error": {"code": -32603, "message": f"Internal error: {e}"}
+        })
+    if response_body:
+        sse_manager.send_to_session(session_id, response_body)
 
 
 # =============================================================================
@@ -2299,7 +2489,7 @@ class ConanMCPServerThread(threading.Thread):
             log_info("MCP server stopped")
 
 
-_server_instance: Optional[ConanMCPServerThread] = None
+_server_instance: Optional[ConanMCPServerThread] = globals().get("_server_instance")
 
 def start_server(host=BIND_ADDRESS, port=DEFAULT_PORT):
     global _server_instance

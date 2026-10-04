@@ -97,7 +97,7 @@ Desde la consola integrada de Unreal Engine (tecla `~` o la barra inferior de co
 - `ConanMCP.Start [Puerto]`: Inicia el servidor manualmente. Si se especifica un número de puerto, sobreescribe el puerto configurado.
 - `ConanMCP.Stop`: Detiene el servidor y libera el socket TCP.
 - `ConanMCP.Status`: Muestra en el Output Log el estado actual, puerto, número de clientes y herramientas registradas.
-- `ConanMCP.ListTools`: Imprime en el Output Log el listado completo de las 38 herramientas con su nivel de seguridad.
+- `ConanMCP.ListTools`: Imprime en el Output Log el listado completo de las 46 herramientas con su nivel de seguridad.
 - `ConanMCP.ReloadTools`: Recarga y vuelve a registrar todas las definiciones de herramientas.
 
 ---
