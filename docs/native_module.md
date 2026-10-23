@@ -1,0 +1,55 @@
+# Optional native module (`ConanMCPNative`)
+
+Everything in ConanMCP works **without compiling anything**: the server is pure Python. The optional C++
+module `Source/ConanMCPNative` adds features that Unreal's Python API cannot provide:
+
+| Feature | Without the module | With the module |
+|---|---|---|
+| `sculpt_terrain` | Edits a 16-bit heightmap PNG that you re-import from Landscape mode | Edits the landscape live, undoable with Ctrl+Z |
+| `paint_landscape_layer` | Not available | Paints and erases material layers |
+| `export_heightmap` / `import_heightmap` | Use Landscape mode → Manage → Export/Import | One tool call each |
+| `compile_blueprint` | Status + matching Output Log lines | Exact compiler errors and warnings |
+| `get_blueprint_info` | Best-effort variable types | Exact pin types, flags, node titles per graph |
+| `add_blueprint_variable` | Needs `BlueprintEditorLibrary.add_member_variable` | Always available |
+| `undo` / `redo` | `TRANSACTION UNDO` console command | Direct editor call |
+
+Python detects the module by itself (`get_server_capabilities` → `native_library: true`).
+
+## Enabling it
+
+> Requires Visual Studio 2022 with the "Game development with C++" workload, and a DevKit that lets you
+> compile plugins. If it fails to build, remove the `Modules` block again: the Python server keeps working.
+
+1. Add this block to `ConanMCP.uplugin`, at the top level (for example after `"CanContainContent": true,`):
+
+   ```json
+   "Modules": [
+     { "Name": "ConanMCPNative", "Type": "Editor", "LoadingPhase": "Default" }
+   ],
+   ```
+
+   Only `ConanMCPNative` is listed on purpose. The legacy `Source/ConanMCP` module (the old C++ HTTP server)
+   stays disabled because the Python server replaces it.
+
+2. Build it, either:
+   - **The plugin is inside a project's `Plugins/` folder**: open the DevKit. When it asks to rebuild the
+     missing modules, answer *Yes*.
+   - **The plugin is inside the engine's `Plugins/` folder**: build it with UAT, then copy the packaged result over the plugin:
+
+     ```bat
+     "<DevKit>\Engine\Build\BatchFiles\RunUAT.bat" BuildPlugin ^
+       -Plugin="<DevKit>\...\Plugins\ConanMCP\ConanMCP.uplugin" ^
+       -Package="C:\Temp\ConanMCPBuild" -TargetPlatforms=Win64
+     ```
+
+3. Restart the DevKit and call `get_server_capabilities`. It should report `native_library: true` and list the
+   functions of `ConanMCPEditorLibrary`.
+
+## Status
+
+The native code targets UE 5.x (`FLandscapeEditDataInterface`, edit layers, `FKismetEditorUtilities`). It has
+**not been compiled against the Conan Exiles DevKit yet**. If your build reports errors, open an issue with the
+compiler output. The usual fixes are small API renames between engine versions.
+
+Landscapes that use **edit layers** need the target layer selected in Landscape mode before sculpting;
+the tool returns a clear error otherwise.

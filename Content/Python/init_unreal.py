@@ -17,9 +17,13 @@ try:
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
     import conan_mcp_server
-    conan_mcp_server.start_server(host="127.0.0.1", port=8123)
+    # Host/port come from CONAN_MCP_HOST / CONAN_MCP_PORT (defaults: 127.0.0.1:8123)
+    conan_mcp_server.start_server()
     if unreal:
-        unreal.log("LogConanMCP: MCP server started on 127.0.0.1:8123 (Endpoint: /mcp)")
+        unreal.log(
+            f"LogConanMCP: MCP server started on "
+            f"{conan_mcp_server.BIND_ADDRESS}:{conan_mcp_server.DEFAULT_PORT} (Endpoint: /mcp)"
+        )
 except Exception as e:
     if unreal:
         unreal.log_error(f"LogConanMCP: Failed to auto-start MCP server: {e}")

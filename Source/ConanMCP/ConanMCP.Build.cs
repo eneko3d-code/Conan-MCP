@@ -30,6 +30,8 @@ public class ConanMCP : ModuleRules
 				"JsonUtilities",
 				"HTTP",
 				"HTTPServer",
+				"Sockets",
+				"Networking",
 				"AssetRegistry",
 				"Projects",
 				"DeveloperSettings"

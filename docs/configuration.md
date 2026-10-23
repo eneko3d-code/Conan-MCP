@@ -92,12 +92,14 @@ int32 MaxAssetQueryResults = 50;
 
 ## 5. Comandos de Consola del Editor
 
+> **Nota (2.0):** estos comandos pertenecen al módulo C++ heredado (`Source/ConanMCP`), que no está incluido en `ConanMCP.uplugin` y por tanto no se carga. El servidor activo es el de Python; usa `get_server_capabilities` / `get_mcp_diagnostics` desde tu cliente MCP.
+
 Desde la consola integrada de Unreal Engine (tecla `~` o la barra inferior de comandos del editor), se encuentran disponibles los siguientes comandos:
 
 - `ConanMCP.Start [Puerto]`: Inicia el servidor manualmente. Si se especifica un número de puerto, sobreescribe el puerto configurado.
 - `ConanMCP.Stop`: Detiene el servidor y libera el socket TCP.
 - `ConanMCP.Status`: Muestra en el Output Log el estado actual, puerto, número de clientes y herramientas registradas.
-- `ConanMCP.ListTools`: Imprime en el Output Log el listado completo de las 38 herramientas con su nivel de seguridad.
+- `ConanMCP.ListTools`: Imprime en el Output Log el listado de herramientas del servidor C++ heredado.
 - `ConanMCP.ReloadTools`: Recarga y vuelve a registrar todas las definiciones de herramientas.
 
 ---

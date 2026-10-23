@@ -7,7 +7,7 @@
 UConanMCPSettings::UConanMCPSettings()
 {
 	bEnableServer = true;
-	bAutoStartServer = true;
+	bAutoStartServer = false;
 	BindAddress = TEXT("127.0.0.1");
 	Port = 8123;
 	EndpointPath = TEXT("/mcp");

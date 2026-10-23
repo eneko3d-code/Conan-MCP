@@ -32,9 +32,13 @@ public:
 	UPROPERTY(config, EditAnywhere, Category = "Server", meta = (DisplayName = "Enable MCP Server"))
 	bool bEnableServer = true;
 
-	/** Automatically start the MCP server when the editor launches. */
+	/**
+	 * Automatically start the native C++ MCP server when the editor launches.
+	 * Disabled by default: the Python server (Content/Python/init_unreal.py) is the canonical
+	 * implementation and already listens on the same port (8123).
+	 */
 	UPROPERTY(config, EditAnywhere, Category = "Server", meta = (DisplayName = "Auto Start MCP Server"))
-	bool bAutoStartServer = true;
+	bool bAutoStartServer = false;
 
 	/**
 	 * Local IP address to bind to. Default: 127.0.0.1.
