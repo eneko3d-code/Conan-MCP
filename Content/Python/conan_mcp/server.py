@@ -14,7 +14,7 @@ from .core.state import STATE
 # Tool modules, in registration order. Later modules override same-named tools
 # (e.g. datatables replaces the v1 get_datatable_row stub).
 TOOL_MODULES = (
-    "builtin", "system", "level", "mapping", "landscape", "capture", "datatables", "blueprints", "mod",
+    "builtin", "system", "level", "mapping", "landscape", "capture", "datatables", "blueprints", "mod", "animation",
 )
 
 # Modules reloaded by reload_server_module(), in dependency order. core.state is never reloaded.
@@ -22,6 +22,7 @@ _RELOAD_ORDER = (
     "core.config", "core.ue", "core.sse", "core.log", "core.security", "core.results", "core.registry",
     "core.dispatcher", "core.protocol", "core.transport",
     "mapping.heightmap", "mapping.terrain", "mapping.placement", "mapping.classify",
+    "animation.roles", "animation.pose", "animation.timing",
 ) + tuple(f"tools.{m}" for m in TOOL_MODULES) + ("prompts",)
 
 

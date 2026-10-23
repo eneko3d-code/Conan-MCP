@@ -7,7 +7,7 @@ editor can change them without restarting the server.
 import os
 
 SERVER_NAME = "conan-devkit-mcp"
-SERVER_VERSION = "2.0.0"
+SERVER_VERSION = "2.1.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 BIND_ADDRESS = os.environ.get("CONAN_MCP_HOST", "127.0.0.1")

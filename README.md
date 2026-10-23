@@ -14,7 +14,7 @@
 
 **The ultimate bridge connecting modern AI Agents (Google Antigravity, Cursor, Claude Code) directly to the Conan Exiles Enhanced DevKit editor.**
 
-[Installation](#-step-by-step-installation) • [Tools (97)](#-what-it-can-do-97-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
+[Installation](#-step-by-step-installation) • [Tools (113)](#-what-it-can-do-113-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
 
 </div>
 
@@ -44,7 +44,11 @@ It lets AI agents (Claude Code, Cursor, Google Antigravity...) **see and edit** 
 4. **Items, recipes and DataTables**: real row data, schema, search, add/update/duplicate/remove rows, JSON/CSV export and import,
    with base-game tables protected.
 5. **Blueprints**: deep inspection, variables, defaults, components, reparenting, compile with errors.
-6. **Mod workflow**: folder layout, broken references, cross-mod dependencies, unsaved packages, rename/move, and a release audit.
+6. **Animation with Control Rig**: give the agent a reference image or description and it poses the character by
+   bone roles, compares captures with the reference, builds attack timing, bakes the AnimSequence and makes the montage.
+7. **Custom attacks and abilities with particles**: reuse a vanilla attack's damage windows, add Niagara/Cascade bursts,
+   trails and sounds at sockets, preview them on the character and hook the montage into the game data.
+8. **Mod workflow**: folder layout, broken references, cross-mod dependencies, unsaved packages, rename/move, and a release audit.
 
 Every edit runs on the Game Thread inside an **undoable transaction** (`undo` tool or Ctrl+Z), and every bulk edit supports `dry_run`.
 
@@ -116,12 +120,12 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
-  "registered_tools": 97,
+  "registered_tools": 113,
   "registered_resources": 4,
-  "registered_prompts": 11,
+  "registered_prompts": 13,
   "sse_endpoint": "/sse",
   "messages_endpoint": "/messages"
 }
@@ -170,7 +174,7 @@ Add to your agent or workspace MCP configuration:
 
 ---
 
-## 🛠️ What it can do (97 tools)
+## 🛠️ What it can do (113 tools)
 
 Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generated from the code).
 
@@ -183,6 +187,7 @@ Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generate
 | **Level** | `classify_level_actors`, `find_actors_in_area`, `spawn_actor`, `spawn_actors_batch`, `scatter_actors`, `place_actors_along_path`, `duplicate_actors`, `delete_actors`, `snap_actors_to_ground`, `validate_placement`, `set_actor_property`, `select_actors`, `focus_viewport` | READ / WRITE |
 | **DataTables** | `get_datatable_row`, `get_datatable_schema`, `search_datatable_rows`, `add/update/duplicate/remove_datatable_row`, `export_datatable`, `import_datatable` | READ / WRITE |
 | **Blueprints** | `get_blueprint_info`, `compile_blueprint`, `add_blueprint_variable`, `set_blueprint_default`, `add_blueprint_component`, `reparent_blueprint` | READ / WRITE |
+| **Animation** | `get_skeleton_roles`, `create_animation_preview`, `set_pose_keys`, `generate_attack_keys`, `capture_animation_frames`, `bake_animation`, `create_montage`, `copy_animation_notifies`, `add_animation_notify`, `preview_ability`, `get_animation_info`, `find_animations` | READ / WRITE |
 | **Mod** | `create_mod_structure`, `validate_assets`, `audit_mod`, `get_asset_referencers`, `list_dirty_packages`, `save_all_dirty`, `rename_asset`, `delete_asset` | READ / WRITE / DESTRUCTIVE |
 | **Assets, Actors, Editor, Skeletons, Particles, Conan** | the original v1 tools (asset search, creation, actor info, sockets, VFX preview, Conan catalog searches) | READ / WRITE |
 | **Scripting** | `execute_python`, disabled by default | DESTRUCTIVE |
@@ -193,10 +198,19 @@ Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generate
 
 The plugin ships playbooks in [`skills/`](skills) that give the agent a method and real criteria, not just tools:
 `conan-map-design`, `conan-landscape-sculpting`, `conan-structures`, `conan-items-recipes`, `conan-blueprint-authoring`,
-`conan-mod-release` and `conan-mcp-safety`.
+`conan-animation-from-reference`, `conan-custom-attacks-vfx`, `conan-mod-release` and `conan-mcp-safety`.
 
 - **Every MCP client** gets them as **MCP prompts** automatically (`prompts/list`).
 - **Claude Code / Antigravity** can also install them as native skills. See [docs/skills.md](docs/skills.md).
+
+---
+
+## 🎬 Animations and custom attacks
+
+Paste a reference image into your AI client and ask, for example, *"make this overhead slash for the human male, with a fire
+trail and an explosion on impact"*. The agent follows the `conan-animation-from-reference` and `conan-custom-attacks-vfx` skills:
+it calibrates the rig, poses it with Control Rig, compares captures with your image, generates the timing, then bakes the
+animation, builds the montage, copies the vanilla damage windows and adds the particles. Full walkthrough: [docs/animation.md](docs/animation.md).
 
 ---
 
@@ -213,7 +227,7 @@ layer painting and exact Blueprint compiler messages. See [docs/native_module.md
 - `devkit://status`, `devkit://logs/recent`, `devkit://outliner`, `conan://tables`, `conan://asset/{package_path}`
 
 ### Prompts (`prompts/get`)
-- The 7 skills above, plus `create-conan-item-mod`, `audit-level-performance`, `inspect-character-skeleton` and `debug-niagara-vfx`.
+- The 9 skills above, plus `create-conan-item-mod`, `audit-level-performance`, `inspect-character-skeleton` and `debug-niagara-vfx`.
 
 ---
 
@@ -230,9 +244,9 @@ graph TD
     subgraph "Conan Exiles DevKit editor"
         T["HTTP /mcp + SSE /sse (loopback, Origin/Host checks, optional token)"]
         P["JSON-RPC engine: schema + path validation, security levels"]
-        R["Registry: 97 tools · 11 prompts (skills) · 5 resources"]
+        R["Registry: 113 tools · 13 prompts (skills) · 5 resources"]
         D["Game Thread dispatcher (timeouts, deferred multi-frame work)"]
-        TL["Tool modules: mapping · landscape · capture · level · datatables · blueprints · mod · builtin"]
+        TL["Tool modules: mapping · landscape · capture · level · datatables · blueprints · animation · mod · builtin"]
         N["Optional C++ ConanMCPNative (landscape edit, BP compiler)"]
         E["Unreal Editor (undoable transactions)"]
     end
@@ -245,11 +259,12 @@ graph TD
 
 ## 🧪 Testing & Verification
 
-- `python -m pytest tests` runs 74 tests on any machine, no Unreal needed. They cover:
+- `python -m pytest tests` runs 88 tests on any machine, no Unreal needed. They cover:
   - the JSON-RPC engine and the security policy;
   - the HTTP and SSE transports;
   - the terrain and brush math, the 16-bit PNG codec, scatter and placement rules;
-  - every new tool against a fake editor (`tests/fake_unreal.py`).
+  - every new tool against a fake editor (`tests/fake_unreal.py`), including the full
+    animation pipeline (preview, Control Rig keys, bake, montage, notifies, captures).
 - CI (GitHub Actions) runs the tests, `ruff`, and checks that `docs/tools.md` matches the code.
 - Live checks inside the DevKit: `get_server_capabilities` reports exactly which engine APIs your build exposes.
   The tools degrade with a clear message when one is missing.

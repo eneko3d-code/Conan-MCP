@@ -67,7 +67,8 @@ def _initialize_result():
         "instructions": (
             "ConanMCP controls the Conan Exiles DevKit editor. Start with get_server_capabilities, "
             "load the matching skill prompt (conan-map-design, conan-landscape-sculpting, conan-structures, "
-            "conan-items-recipes, conan-blueprint-authoring, conan-mod-release, conan-mcp-safety) "
+            "conan-items-recipes, conan-blueprint-authoring, conan-animation-from-reference, conan-custom-attacks-vfx, "
+            "conan-mod-release, conan-mcp-safety) "
             "and prefer dry_run=true before any write. Every write is undoable with the 'undo' tool."
         ),
     }

@@ -22,7 +22,7 @@ Añade la siguiente definición a la configuración de MCP de tu agente o en el 
 ```
 *(También se soporta `"url": "http://127.0.0.1:8123/mcp"` para transporte HTTP POST clásico)*
 
-Una vez configurado, Antigravity descubrirá automáticamente las **97 herramientas**, los **Recursos** (`devkit://status`, `devkit://logs/recent`, etc.) y los **Prompts** del Conan DevKit.
+Una vez configurado, Antigravity descubrirá automáticamente las **113 herramientas**, los **Recursos** (`devkit://status`, `devkit://logs/recent`, etc.) y los **Prompts** del Conan DevKit.
 
 ---
 

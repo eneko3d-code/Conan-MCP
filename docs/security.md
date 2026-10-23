@@ -26,7 +26,7 @@ El plugin **ConanMCP** fue diseñado bajo el principio de **Mínimo Privilegio**
 
 ## 2. Clasificación de Herramientas y Matriz de Autorización
 
-Cada una de las 97 herramientas del servidor tiene asignado un nivel de seguridad inmutable:
+Cada una de las 113 herramientas del servidor tiene asignado un nivel de seguridad inmutable:
 
 | Nivel de Seguridad | Descripción | Soporte de Undo/Redo | Estado por Defecto |
 |---|---|---|---|

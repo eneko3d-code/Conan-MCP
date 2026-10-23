@@ -24,6 +24,15 @@ PROBES = {
     "dirty_packages": "EditorLoadingAndSavingUtils.get_dirty_content_packages",
     "landscape": "Landscape",
     "native_library": ue.NATIVE_LIBRARY_NAME,
+    "control_rig_sequencer": "ControlRigSequencerLibrary",
+    "fk_control_rig": "FKControlRig",
+    "level_sequence": "LevelSequence",
+    "sequencer_editor": "LevelSequenceEditorBlueprintLibrary.set_current_time",
+    "export_anim_sequence": "SequencerTools.export_anim_sequence",
+    "anim_notifies": "AnimationLibrary.add_animation_notify_event",
+    "reference_pose": "AnimPoseExtensions.get_reference_pose",
+    "montage_factory": "AnimMontageFactory",
+    "niagara": "NiagaraFunctionLibrary.spawn_system_attached",
 }
 
 

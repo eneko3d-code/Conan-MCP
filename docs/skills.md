@@ -10,6 +10,8 @@ which tools to call, in which order, and the design or safety rules to apply.
 | `conan-structures` | Identifying, removing, placing, replacing and cleaning up structures and props |
 | `conan-items-recipes` | New or changed items, recipes and other DataTable content, kept inside the mod's own tables |
 | `conan-blueprint-authoring` | Inspecting and modifying Blueprints, and what is not possible through the API |
+| `conan-animation-from-reference` | Turning an image or description into an animation with Control Rig: read the pose, calibrate axes, key by bone roles, compare captures, time, bake |
+| `conan-custom-attacks-vfx` | Making attacks/abilities playable: reuse vanilla damage windows, add Niagara/Cascade bursts, trails and sounds, montage, hook into game data |
 | `conan-mod-release` | Mod folder layout and the pre-release audit checklist |
 | `conan-mcp-safety` | Ground rules: capabilities, dry runs, undo, limits, saving |
 

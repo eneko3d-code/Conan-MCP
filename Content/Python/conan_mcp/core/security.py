@@ -12,6 +12,7 @@ DESTRUCTIVE = "DESTRUCTIVE"
 PATH_ARG_NAMES = {
     "package_path", "asset_path", "path", "datatable_path", "blueprint_path", "particle_path",
     "mesh_path", "mod_path", "source_path", "destination_path", "template_path", "target_path", "copy_struct_from",
+    "anim_path", "template_montage", "rig_path",
 }
 PATH_LIST_ARG_NAMES = {"asset_paths", "package_paths"}
 
