@@ -11,5 +11,10 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: pip install pytest
-      - run: python -m pytest tests -q
+      - run: pip install pytest ruff
+      - name: Lint
+        run: ruff check --select F,E9 Content/Python tests scripts
+      - name: Tests
+        run: python -m pytest tests -q
+      - name: Tool catalog is up to date
+        run: python scripts/generate_tool_docs.py --check

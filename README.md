@@ -7,14 +7,14 @@
 [![Protocol](https://img.shields.io/badge/Protocol-MCP%20%2F%20JSON--RPC%202.0-green.svg?style=for-the-badge)](https://modelcontextprotocol.io/)
 [![Author](https://img.shields.io/badge/Author-Eneko3D-purple.svg?style=for-the-badge&logo=github)](https://github.com/eneko3d-code)
 [![Built With](https://img.shields.io/badge/Created%20With-Google%20Antigravity-4285F4.svg?style=for-the-badge&logo=google)](https://deepmind.google/)
-[![Status](https://img.shields.io/badge/Status-Tested%20%26%20Working-brightgreen.svg?style=for-the-badge)](#-testing--verification)
+[![Status](https://img.shields.io/badge/Status-2.0%20beta-yellow.svg?style=for-the-badge)](#-testing--verification)
 [![License](https://img.shields.io/badge/License-MIT-lightgrey.svg?style=for-the-badge)](LICENSE)
 
 <br>
 
 **The ultimate bridge connecting modern AI Agents (Google Antigravity, Cursor, Claude Code) directly to the Conan Exiles Enhanced DevKit editor.**
 
-[Installation](#-step-by-step-installation) • [Tool Catalog (46)](#-mcp-tool-catalog-46-tools) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
+[Installation](#-step-by-step-installation) • [Tools (97)](#-what-it-can-do-97-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
 
 </div>
 
@@ -24,19 +24,29 @@
 
 - **Creator & Developer:** **Eneko3D** ([@eneko3d-code](https://github.com/eneko3d-code))
 - **Architected & Built with:** **Google Antigravity**
-- **Verified Compatibility:** **100% Tested & Verified Working** on the latest current version of the **Conan Exiles Enhanced DevKit** (`5.8.2-377096+++exiles+release`).
+- **Compatibility:** built for the **Conan Exiles Enhanced DevKit** (`5.8.2-377096+++exiles+release`). The v1 tools were tested in the DevKit; the 2.0 tools are covered by the automated tests and need live validation (run `get_server_capabilities` first).
 
 ---
 
 ## 📖 Overview
 
-**ConanMCP** is a standalone Unreal Engine plugin specifically engineered for the **Conan Exiles Enhanced DevKit**. It implements a native **Model Context Protocol (MCP)** server over **JSON-RPC 2.0** via local HTTP (`http://127.0.0.1:8123/mcp`).
+**ConanMCP** is an Unreal Engine plugin for the **Conan Exiles Enhanced DevKit**. It runs a **Model Context Protocol (MCP)** server
+inside the editor (pure Python, nothing to compile) on `http://127.0.0.1:8123` (`/mcp` HTTP and `/sse`).
 
-It empowers external AI coding assistants and autonomous agents to:
-1. **Live Editor Inspection:** Inspect actors, levels, Blueprints, DataTables, skeletal meshes, and bone/socket hierarchies in real time.
-2. **Automated Blueprint Authoring:** Dynamically create, wire, compile, and validate Blueprint function graphs and node networks.
-3. **Conan Exiles Catalog Indexing:** Query the `AssetRegistry` with high performance (over 1,022 indexed Niagara/Cascade VFX, items, thralls, and weapons).
-4. **Safe Game-Thread Execution:** All tools run on the Game Thread; `SAFE_WRITE` tools record Undo/Redo transactions.
+It lets AI agents (Claude Code, Cursor, Google Antigravity...) **see and edit** the DevKit:
+
+1. **Map design with judgement**: terrain analysis (heights, slopes, walkable %, flat build sites), actor density maps,
+   top-down captures returned as images, and a `conan-map-design` skill with real level-design rules.
+2. **Terrain editing**: raise / lower / flatten / smooth / noise / ramp brushes and layer painting, either live (optional native
+   module) or through a 16-bit heightmap PNG.
+3. **Structures and props**: classify everything in the level, query by area, place (single, batch, scatter, along paths),
+   snap to ground, duplicate, remove, and validate (floating, buried, overlapping, too steep).
+4. **Items, recipes and DataTables**: real row data, schema, search, add/update/duplicate/remove rows, JSON/CSV export and import,
+   with base-game tables protected.
+5. **Blueprints**: deep inspection, variables, defaults, components, reparenting, compile with errors.
+6. **Mod workflow**: folder layout, broken references, cross-mod dependencies, unsaved packages, rename/move, and a release audit.
+
+Every edit runs on the Game Thread inside an **undoable transaction** (`undo` tool or Ctrl+Z), and every bulk edit supports `dry_run`.
 
 ---
 
@@ -92,6 +102,8 @@ http://127.0.0.1:8123/mcp
 | `CONAN_MCP_ENABLE_DESTRUCTIVE` | `0` | `1` enables `DESTRUCTIVE` tools such as `execute_python`. |
 | `CONAN_MCP_HOST` / `CONAN_MCP_PORT` | `127.0.0.1` / `8123` | Bind address and port. |
 | `CONAN_MCP_TIMEOUT` | `30` | Seconds a tool may wait for the Game Thread. |
+| `CONAN_MCP_MAX_ACTORS` | `200` | Hard limit of actors per bulk write (spawn, scatter, delete...). |
+| `CONAN_MCP_EXTRA_PATHS` | *(empty)* | Extra Python paths (separated by `;`) to add at startup. |
 
 Requests carrying a non-loopback `Origin` or `Host` header are rejected (protects against malicious web pages and DNS rebinding), and package paths must live under `/Game`, `/Engine` or `/ConanSandbox`.
 
@@ -104,12 +116,12 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "1.1.1",
+  "version": "2.0.0",
   "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
-  "registered_tools": 46,
+  "registered_tools": 97,
   "registered_resources": 4,
-  "registered_prompts": 4,
+  "registered_prompts": 11,
   "sse_endpoint": "/sse",
   "messages_endpoint": "/messages"
 }
@@ -158,36 +170,50 @@ Add to your agent or workspace MCP configuration:
 
 ---
 
-## 🛠️ MCP Tool Catalog (46 Tools)
+## 🛠️ What it can do (97 tools)
 
-| Category | Tools | Access Level | Description |
-|---|---|---|---|
-| **Editor** | `get_editor_status`, `get_current_level`, `save_current_level`, `get_selected_actors`, `get_mcp_diagnostics`, `reload_server` | `READ_ONLY` / `SAFE_WRITE` | Engine status, active level, transactional saving, selected actors, MCP telemetry, and hot reload. |
-| **Actors** | `list_level_actors`, `find_actor`, `get_actor_info`, `get_actor_transform`, `set_actor_transform`, `get_actor_components` | `READ_ONLY` / `SAFE_WRITE` | Enumerate, search, inspect, and safely transform world actors and their components. |
-| **Assets** | `find_assets`, `get_asset_info`, `get_asset_class`, `get_asset_path`, `get_asset_dependencies`, `save_asset`, `create_blueprint`, `create_widget_blueprint`, `create_struct`, `create_enum`, `create_datatable` | `READ_ONLY` / `SAFE_WRITE` | High-efficiency AssetRegistry queries with pagination, dependency tracing, asset creation, and saving. |
-| **Skeletons** | `get_skeletal_mesh_info`, `get_skeleton_info`, `get_skeleton_sockets`, `get_bones` | `READ_ONLY` | Inspect skeletal meshes, bone counts, socket attachments, and bone hierarchies. |
-| **Blueprints** | `find_blueprint`, `get_blueprint_info`, `get_blueprint_parent_class`, `get_blueprint_variables` | `READ_ONLY` | Deep Blueprint inspection, member variables, types, graph nodes, and parent classes. |
-| **DataTables** | `find_datatable`, `get_datatable_info`, `list_datatable_rows`, `get_datatable_row` | `READ_ONLY` | Inspect Conan DataTables, paginated row dumping, and row data in clean JSON format. |
-| **Particles** | `find_particle_systems`, `get_particle_info`, `get_character_sockets`, `preview_particle_on_actor`, `remove_preview_particle` | `READ_ONLY` / `SAFE_WRITE` | Index Niagara & Cascade systems, inspect parameters, and preview particles on actor sockets. |
-| **Conan Exiles** | `find_conan_assets`, `find_conan_datatables`, `find_conan_characters`, `find_conan_items`, `find_conan_particles` | `READ_ONLY` | Domain-specific tools optimized for Conan items, recipes, thralls, weapons, and VFX. |
-| **Scripting** | `execute_python` | `DESTRUCTIVE` | Execute arbitrary Python on the Game Thread. **Disabled by default** — opt in with `CONAN_MCP_ENABLE_DESTRUCTIVE=1`. |
+Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generated from the code).
+
+| Area | Highlights | Level |
+|---|---|---|
+| **System** | `get_server_capabilities` (call first), `undo`, `redo`, `get_output_log` | READ / WRITE |
+| **Mapping** | `analyze_terrain`, `sample_terrain`, `get_map_layout` | READ |
+| **Landscape** | `get_landscape_info`, `sculpt_terrain`, `paint_landscape_layer`, `export_heightmap`, `import_heightmap` | WRITE |
+| **Capture** | `capture_map_overview` (top-down image + pixel→world mapping), `capture_viewport` | READ |
+| **Level** | `classify_level_actors`, `find_actors_in_area`, `spawn_actor`, `spawn_actors_batch`, `scatter_actors`, `place_actors_along_path`, `duplicate_actors`, `delete_actors`, `snap_actors_to_ground`, `validate_placement`, `set_actor_property`, `select_actors`, `focus_viewport` | READ / WRITE |
+| **DataTables** | `get_datatable_row`, `get_datatable_schema`, `search_datatable_rows`, `add/update/duplicate/remove_datatable_row`, `export_datatable`, `import_datatable` | READ / WRITE |
+| **Blueprints** | `get_blueprint_info`, `compile_blueprint`, `add_blueprint_variable`, `set_blueprint_default`, `add_blueprint_component`, `reparent_blueprint` | READ / WRITE |
+| **Mod** | `create_mod_structure`, `validate_assets`, `audit_mod`, `get_asset_referencers`, `list_dirty_packages`, `save_all_dirty`, `rename_asset`, `delete_asset` | READ / WRITE / DESTRUCTIVE |
+| **Assets, Actors, Editor, Skeletons, Particles, Conan** | the original v1 tools (asset search, creation, actor info, sockets, VFX preview, Conan catalog searches) | READ / WRITE |
+| **Scripting** | `execute_python`, disabled by default | DESTRUCTIVE |
+
+---
+
+## 🧠 Skills
+
+The plugin ships playbooks in [`skills/`](skills) that give the agent a method and real criteria, not just tools:
+`conan-map-design`, `conan-landscape-sculpting`, `conan-structures`, `conan-items-recipes`, `conan-blueprint-authoring`,
+`conan-mod-release` and `conan-mcp-safety`.
+
+- **Every MCP client** gets them as **MCP prompts** automatically (`prompts/list`).
+- **Claude Code / Antigravity** can also install them as native skills. See [docs/skills.md](docs/skills.md).
+
+---
+
+## ⚙️ Optional native module
+
+Everything works without compiling. Enabling the optional C++ module `ConanMCPNative` adds live in-editor sculpting,
+layer painting and exact Blueprint compiler messages. See [docs/native_module.md](docs/native_module.md).
 
 ---
 
 ## 📦 MCP Resources & Prompts
 
 ### Resources (`resources/read`)
-- `devkit://status`: Real-time editor status, level path, dirty status, actor count, and memory metrics.
-- `devkit://logs/recent`: Live ring buffer of the latest Output Log messages recorded by ConanMCP.
-- `devkit://outliner`: Level actor tree with class, label, and visibility.
-- `conan://tables`: High-level inventory of all Conan Exiles gameplay, item, and spawn DataTables.
-- `conan://asset/{package_path}`: Resource Template for inspecting asset metadata and dependencies by URI.
+- `devkit://status`, `devkit://logs/recent`, `devkit://outliner`, `conan://tables`, `conan://asset/{package_path}`
 
 ### Prompts (`prompts/get`)
-- `create-conan-item-mod`: Interactive walkthrough to author and wire a custom weapon or armor mod.
-- `audit-level-performance`: Audit active level actor density, light counts, and particle previews.
-- `inspect-character-skeleton`: Audit character sockets, bones, and attach points for thralls.
-- `debug-niagara-vfx`: Locate, diagnose, and preview particle systems on actor sockets.
+- The 7 skills above, plus `create-conan-item-mod`, `audit-level-performance`, `inspect-character-skeleton` and `debug-niagara-vfx`.
 
 ---
 
@@ -195,49 +221,38 @@ Add to your agent or workspace MCP configuration:
 
 ```mermaid
 graph TD
-    subgraph "External AI Clients"
+    subgraph "AI clients"
         AG[Google Antigravity]
-        CR[Cursor IDE]
+        CR[Cursor]
         CC[Claude Code]
     end
 
-    subgraph "Conan Exiles DevKit (UE 5.8.2 / Port 8123)"
-        HTTP["HTTP / JSON-RPC 2.0 Server (/mcp)"]
-        AUTH["Security & Request Validation"]
-        REG["Tool Registry (46 Registered Tools)"]
-        
-        subgraph "Execution Toolsets"
-            ED[Editor Tools]
-            AC[Actor Tools]
-            AS[Asset Tools]
-            BP[Blueprint Tools]
-            DT[DataTable Tools]
-            PT[Particle Tools]
-            CN[Conan Domain Tools]
-        end
-        
-        GT["Unreal Game Thread (FScopedTransaction)"]
-        ENG["UE 5.8.2 Engine / Conan Sandbox Content"]
+    subgraph "Conan Exiles DevKit editor"
+        T["HTTP /mcp + SSE /sse (loopback, Origin/Host checks, optional token)"]
+        P["JSON-RPC engine: schema + path validation, security levels"]
+        R["Registry: 97 tools · 11 prompts (skills) · 5 resources"]
+        D["Game Thread dispatcher (timeouts, deferred multi-frame work)"]
+        TL["Tool modules: mapping · landscape · capture · level · datatables · blueprints · mod · builtin"]
+        N["Optional C++ ConanMCPNative (landscape edit, BP compiler)"]
+        E["Unreal Editor (undoable transactions)"]
     end
 
-    AG -->|JSON-RPC 2.0 POST| HTTP
-    CR -->|JSON-RPC 2.0 POST| HTTP
-    CC -->|JSON-RPC 2.0 POST| HTTP
-
-    HTTP --> AUTH --> REG
-    REG --> ED & AC & AS & BP & DT & PT & CN
-    ED & AC & AS & BP & DT & PT & CN --> GT --> ENG
+    AG & CR & CC --> T --> P --> R --> D --> TL --> E
+    TL -.-> N --> E
 ```
 
 ---
 
 ## 🧪 Testing & Verification
 
-ConanMCP has been rigorously tested in live production sessions with the DevKit open:
-- **Low-Latency Operations:** Response times < 15ms for local tool queries.
-- **Transactional Safety:** All `SAFE_WRITE` operations create undo history records compatible with `Ctrl+Z`.
-- **Anti-Hang Protection:** Configurable execution watchdog (`CONAN_MCP_TIMEOUT`, default 30 s); timed-out tasks are cancelled instead of running late.
-- **Automated Tests:** `python -m pytest tests` covers the JSON-RPC engine, security policy, and HTTP/SSE transport (no Unreal needed).
+- `python -m pytest tests` runs 74 tests on any machine, no Unreal needed. They cover:
+  - the JSON-RPC engine and the security policy;
+  - the HTTP and SSE transports;
+  - the terrain and brush math, the 16-bit PNG codec, scatter and placement rules;
+  - every new tool against a fake editor (`tests/fake_unreal.py`).
+- CI (GitHub Actions) runs the tests, `ruff`, and checks that `docs/tools.md` matches the code.
+- Live checks inside the DevKit: `get_server_capabilities` reports exactly which engine APIs your build exposes.
+  The tools degrade with a clear message when one is missing.
 
 ---
 

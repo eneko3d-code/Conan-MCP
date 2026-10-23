@@ -11,6 +11,11 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "Content", "Python"))
 import conan_mcp_server as srv  # noqa: E402
+from conan_mcp.core import config, dispatcher, security, transport  # noqa: E402
+from conan_mcp.core import registry as regmod  # noqa: E402
+from conan_mcp.core.sse import get_manager  # noqa: E402
+from conan_mcp.core.state import STATE  # noqa: E402
+from conan_mcp.tools import builtin  # noqa: E402
 
 
 def rpc(method, params=None, req_id=1):
@@ -50,27 +55,27 @@ def test_parse_error_and_unknown_method():
 
 def test_tools_list_matches_registry():
     tools = rpc("tools/list")["result"]["tools"]
-    assert len(tools) == len(srv.registry.tools) >= 46
+    assert len(tools) == len(regmod.registry.tools) >= 46
 
 
 # --- Security policy -------------------------------------------------------
 
 def test_execute_python_is_destructive_and_disabled_by_default(monkeypatch):
-    assert srv.registry.get_tool("execute_python")["security"] == srv.DESTRUCTIVE
-    monkeypatch.setattr(srv, "ENABLE_DESTRUCTIVE_TOOLS", False)
+    assert regmod.registry.get_tool("execute_python")["security"] == security.DESTRUCTIVE
+    monkeypatch.setattr(config, "ENABLE_DESTRUCTIVE_TOOLS", False)
     res = rpc("tools/call", {"name": "execute_python", "arguments": {"code": "_result = 1"}})["result"]
     assert res["isError"] is True and "DESTRUCTIVE" in res["content"][0]["text"]
 
 
 def test_execute_python_runs_when_enabled(monkeypatch):
-    monkeypatch.setattr(srv, "ENABLE_DESTRUCTIVE_TOOLS", True)
+    monkeypatch.setattr(config, "ENABLE_DESTRUCTIVE_TOOLS", True)
     res = rpc("tools/call", {"name": "execute_python", "arguments": {"code": "_result = 2 + 2"}})["result"]
     assert res["isError"] is False
     assert json.loads(res["content"][0]["text"])["result"] == "4"
 
 
 def test_write_tools_can_be_disabled(monkeypatch):
-    monkeypatch.setattr(srv, "ENABLE_WRITE_TOOLS", False)
+    monkeypatch.setattr(config, "ENABLE_WRITE_TOOLS", False)
     res = rpc("tools/call", {"name": "save_current_level", "arguments": {}})["result"]
     assert res["isError"] is True
 
@@ -78,12 +83,12 @@ def test_write_tools_can_be_disabled(monkeypatch):
 @pytest.mark.parametrize("bad", ["/Game/../Windows", "C:\\Windows", "/etc/passwd", "/Game//x", "Game/x"])
 def test_path_validation_rejects(bad):
     with pytest.raises(ValueError):
-        srv.validate_package_path(bad)
+        security.validate_package_path(bad)
 
 
 @pytest.mark.parametrize("good", ["/Game", "/Game/Mods/BP_X.BP_X", "/ConanSandbox/Items", "/Engine/Foo"])
 def test_path_validation_accepts(good):
-    srv.validate_package_path(good)
+    security.validate_package_path(good)
 
 
 def test_tool_call_rejects_traversal():
@@ -93,7 +98,7 @@ def test_tool_call_rejects_traversal():
 
 def test_resource_template_rejects_outside_roots():
     with pytest.raises(ValueError):
-        srv.resource_template_conan_asset("conan://asset/x", "/etc/passwd")
+        builtin.resource_template_conan_asset("conan://asset/x", "/etc/passwd")
 
 
 # --- Game thread dispatcher ------------------------------------------------
@@ -101,12 +106,12 @@ def test_resource_template_rejects_outside_roots():
 def test_timeout_cancels_queued_task(monkeypatch):
     """A task that timed out must not run later."""
     ran = []
-    monkeypatch.setattr(srv, "unreal", object())  # force the queue path
-    monkeypatch.setattr(srv, "ensure_ticker_registered", lambda: None)
-    monkeypatch.setattr(srv, "TOOL_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(STATE, "ticker_handle", "fake-ticker")  # force the queue path
+    monkeypatch.setattr(dispatcher, "ensure_ticker_registered", lambda: None)
+    monkeypatch.setattr(config, "TOOL_TIMEOUT_SECONDS", 0.05)
     with pytest.raises(TimeoutError):
-        srv.execute_on_game_thread(lambda: ran.append(1))
-    srv._game_thread_ticker(0.0)  # drain the queue as the engine tick would
+        dispatcher.execute_on_game_thread(lambda: ran.append(1))
+    dispatcher._game_thread_ticker(0.0)  # drain the queue as the engine tick would
     assert ran == []
 
 
@@ -114,7 +119,7 @@ def test_timeout_cancels_queued_task(monkeypatch):
 
 @pytest.fixture()
 def http_server():
-    httpd = ThreadingHTTPServer(("127.0.0.1", 0), srv.ConanMCPRequestHandler)
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), transport.ConanMCPRequestHandler)
     httpd.daemon_threads = True
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     yield f"http://127.0.0.1:{httpd.server_address[1]}"
@@ -164,13 +169,13 @@ def test_bad_host_header_is_blocked(http_server):
 
 def test_oversized_body_rejected(http_server):
     req = urllib.request.Request(http_server + "/mcp", data=b"{}", method="POST",
-                                 headers={"Content-Length": str(srv.MAX_REQUEST_BODY_BYTES + 1)})
+                                 headers={"Content-Length": str(config.MAX_REQUEST_BODY_BYTES + 1)})
     with pytest.raises((urllib.error.HTTPError, urllib.error.URLError, ConnectionError)):
         urllib.request.urlopen(req, timeout=5)
 
 
 def test_token_enforced(http_server, monkeypatch):
-    monkeypatch.setattr(srv, "CONAN_MCP_TOKEN", "s3cret")
+    monkeypatch.setattr(config, "CONAN_MCP_TOKEN", "s3cret")
     assert http(http_server + "/mcp")[0] == 401
     assert http(http_server + "/mcp", headers={"Authorization": "Bearer s3cret"})[0] == 200
 
@@ -220,10 +225,10 @@ def test_wrong_argument_type_is_rejected():
 def test_schema_validator_enum_range_and_bool():
     schema = {"properties": {"n": {"type": "integer", "minimum": 1, "maximum": 5},
                              "k": {"type": "string", "enum": ["a", "b"]}}}
-    srv.validate_against_schema({"n": 3, "k": "a"}, schema)
+    security.validate_against_schema({"n": 3, "k": "a"}, schema)
     for bad in ({"n": 0}, {"n": 6}, {"n": True}, {"k": "z"}):
         with pytest.raises(ValueError):
-            srv.validate_against_schema(bad, schema)
+            security.validate_against_schema(bad, schema)
 
 
 def test_tool_annotations_reflect_security_level():
@@ -234,10 +239,10 @@ def test_tool_annotations_reflect_security_level():
 
 
 def test_reload_preserves_runtime_state():
-    sessions_before, queue_before = srv.sse_manager, srv._game_thread_queue
-    started_before = srv._server_start_time
+    sessions_before, queue_before = get_manager(), STATE.game_thread_queue
+    started_before = STATE.server_start_time
     result = srv.reload_server_module()
     assert result["reloaded"] is True and result["tools_count"] >= 46
-    assert srv.sse_manager is sessions_before
-    assert srv._game_thread_queue is queue_before
-    assert srv._server_start_time == started_before
+    assert get_manager() is sessions_before
+    assert STATE.game_thread_queue is queue_before
+    assert STATE.server_start_time == started_before

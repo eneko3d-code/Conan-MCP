@@ -93,7 +93,7 @@ El motor detectará el plugin, montará el contenido y ejecutará `Content/Pytho
 En el Output Log del editor se observará:
 ```
 LogConanMCP: Starting ConanMCP auto-initializer...
-LogConanMCP: Registered 46 tools for ConanMCP
+LogConanMCP: Registered 97 tools, 4 resources, 11 prompts
 LogConanMCP: MCP server started on 127.0.0.1:8123 (Endpoint: /mcp)
 ```
 
@@ -112,7 +112,7 @@ service          : ConanMCP
 version          : 1.0.0
 protocol         : MCP / JSON-RPC 2.0
 status           : running
-registered_tools : 46
+registered_tools : 97
 ```
 
 ### Opción B: Comprobación con cURL

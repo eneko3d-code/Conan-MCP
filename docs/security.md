@@ -26,13 +26,13 @@ El plugin **ConanMCP** fue diseñado bajo el principio de **Mínimo Privilegio**
 
 ## 2. Clasificación de Herramientas y Matriz de Autorización
 
-Cada una de las 46 herramientas del servidor tiene asignado un nivel de seguridad inmutable:
+Cada una de las 97 herramientas del servidor tiene asignado un nivel de seguridad inmutable:
 
 | Nivel de Seguridad | Descripción | Soporte de Undo/Redo | Estado por Defecto |
 |---|---|---|---|
 | **`READ_ONLY`** | Herramientas de consulta pura, inspección de propiedades, búsqueda en AssetRegistry y lectura de DataTables. No alteran el estado en disco ni en memoria. | N/A | **Permitido** |
 | **`SAFE_WRITE`** | Herramientas que modifican actores en el nivel, guardan el nivel o añaden componentes de previsualización temporal. | **Obligatorio (`Ctrl+Z`)** | **Permitido** (conmutable con `ENABLE_WRITE_TOOLS`) |
-| **`DESTRUCTIVE`** | Herramientas con efectos no acotados o irreversibles (`execute_python`). | Parcial | **Desactivado** (activar con `CONAN_MCP_ENABLE_DESTRUCTIVE=1`) |
+| **`DESTRUCTIVE`** | Herramientas con efectos no acotados o irreversibles (`execute_python`, `delete_asset`). | Parcial | **Desactivado** (activar con `CONAN_MCP_ENABLE_DESTRUCTIVE=1`) |
 
 ### Manejo de Violaciones de Seguridad
 Si un cliente MCP intenta ejecutar una herramienta que requiere un permiso desactivado (por ejemplo, una herramienta de escritura con `CONAN_MCP_READONLY=1`), el servidor deniega la ejecución y responde con un resultado MCP `isError: true`:
@@ -48,6 +48,12 @@ Si un cliente MCP intenta ejecutar una herramienta que requiere un permiso desac
 ```
 
 ---
+
+### Herramientas de edición masiva (2.0)
+- `delete_actors`, `spawn_actors_batch`, `scatter_actors`, `snap_actors_to_ground`, `duplicate_actors`, etc. son `SAFE_WRITE`: se ejecutan en **una sola transacción** (se deshacen con `undo` o Ctrl+Z), aceptan `dry_run` y tienen un límite por llamada (`max_count`, tope duro `CONAN_MCP_MAX_ACTORS`, 200 por defecto).
+- `delete_actors` nunca toca Landscape, WorldSettings, foliage ni otros actores críticos salvo `allow_protected=true`, y exige un filtro o una lista explícita.
+- Las DataTables fuera de `/Game/Mods` son de solo lectura salvo `allow_base_game_table=true`.
+- Los ficheros (heightmaps, capturas, exportaciones) solo se leen y escriben en `<Proyecto>/Saved/ConanMCP/` y solo con nombres de fichero simples.
 
 ## 3. Soporte Transaccional de Editor (`Ctrl+Z` / Deshacer)
 

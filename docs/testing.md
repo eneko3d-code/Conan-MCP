@@ -1,5 +1,7 @@
 # Protocolo de Pruebas y Verificación: ConanMCP
 
+> **Nota (2.0):** este documento recoge la sesión de validación en vivo de la versión 1.x (46 herramientas). La 2.0 añade 51 herramientas que se verifican con la batería automática (`python -m pytest tests`, 74 tests con un editor simulado) y deben validarse en el DevKit con `get_server_capabilities`.
+
 Este documento describe la suite de pruebas automatizadas, las pruebas manuales y los procedimientos de verificación para el plugin **ConanMCP** en el Conan Exiles Enhanced DevKit.
 
 ---
