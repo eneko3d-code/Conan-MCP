@@ -39,7 +39,10 @@ def call_tool(tool_name: str, tool_args: dict) -> Dict[str, Any]:
     log_info(f"Tool called: {tool_name}")
     try:
         validate_tool_arguments(tool_args, tool_def.get("inputSchema"))
-        result = execute_on_game_thread(tool_def["handler"], tool_args)
+        if tool_def.get("off_game_thread"):
+            result = tool_def["handler"](tool_args)
+        else:
+            result = execute_on_game_thread(tool_def["handler"], tool_args)
     except Exception as e:
         STATE.count_error()
         log_error(f"Tool error in '{tool_name}': {e}")
@@ -67,7 +70,8 @@ def _initialize_result():
         "instructions": (
             "ConanMCP controls the Conan Exiles DevKit editor. Start with get_server_capabilities, "
             "load the matching skill prompt (conan-map-design, conan-landscape-sculpting, conan-structures, "
-            "conan-items-recipes, conan-blueprint-authoring, conan-mod-release, conan-mcp-safety) "
+            "conan-items-recipes, conan-blueprint-authoring, conan-animation-from-reference, conan-custom-attacks-vfx, "
+            "conan-tripo-assets, conan-mod-release, conan-mcp-safety) "
             "and prefer dry_run=true before any write. Every write is undoable with the 'undo' tool."
         ),
     }

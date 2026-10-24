@@ -57,6 +57,10 @@ class Object:
     def get_class(self):
         return _Cls(type(self).__name__)
 
+    def __dir__(self):
+        # Like the real Python wrappers, reflected properties show up in dir()
+        return sorted(set(super().__dir__()) | set(self._props))
+
     def get_editor_property(self, name):
         if name not in self._props:
             raise AttributeError(f"{type(self).__name__} has no property '{name}'")
@@ -487,3 +491,478 @@ class FakeNativeLibrary:
 
     def undo_last_transaction(self):
         return True
+
+
+# ---------------------------------------------------------------------------
+# Animation APIs (Control Rig, sequencer, notifies)
+# ---------------------------------------------------------------------------
+
+import copy as _copy  # noqa: E402
+import sys as _sys  # noqa: E402
+import os as _os  # noqa: E402
+
+_sys.path.insert(0, _os.path.join(_os.path.dirname(__file__), "..", "Content", "Python"))
+from conan_mcp.animation import pose as _pose  # noqa: E402
+
+
+class Quat:
+    def __init__(self, x=0.0, y=0.0, z=0.0, w=1.0):
+        self.x, self.y, self.z, self.w = x, y, z, w
+
+    def rotator(self):
+        r = _pose.quat_to_rotator((self.x, self.y, self.z, self.w))
+        out = Rotator()
+        out.pitch, out.yaw, out.roll = r["pitch"], r["yaw"], r["roll"]
+        return out
+
+
+def _rot_quat(self):
+    return Quat(*_pose.rotator_to_quat(self.pitch, self.yaw, self.roll))
+
+
+Rotator.quaternion = _rot_quat
+
+
+class Transform:
+    def __init__(self, translation=None, rotation=None, scale=None):
+        self.translation = translation or Vector()
+        self.rotation = rotation or Quat()
+        self.scale3d = scale or Vector(1, 1, 1)
+
+
+class EulerTransform:
+    def __init__(self, location=None, rotation=None, scale=None):
+        self.location = location or Vector()
+        self.rotation = rotation or Rotator()
+        self.scale = scale or Vector(1, 1, 1)
+
+
+class FrameRate:
+    def __init__(self, num=30, den=1):
+        self.numerator, self.denominator = num, den
+
+
+class FrameNumber:
+    def __init__(self, value=0):
+        self.value = int(value)
+
+
+class MovieSceneTimeUnit:
+    DISPLAY_RATE = 0
+
+
+class AnimPoseSpaces:
+    LOCAL = 0
+
+
+class Skeleton(Object):
+    def __init__(self, name, path, bones, ref=None):
+        super().__init__(name, path)
+        self.bones = bones
+        self.ref = ref or {}
+
+
+class SkeletalMesh(Object):
+    def __init__(self, name, path, skeleton):
+        super().__init__(name, path)
+        self._props["skeleton"] = skeleton
+
+
+class SkeletalMeshComponent(Object):
+    def __init__(self):
+        super().__init__()
+        self.override = None
+
+    def override_animation_data(self, anim, looping, playing, position, rate):
+        self.override = (anim, position)
+
+
+class SkeletalMeshActor(Actor):
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.mesh_component = SkeletalMeshComponent()
+
+    def get_component_by_class(self, cls):
+        return self.mesh_component if cls is SkeletalMeshComponent else None
+
+
+class _Pose:
+    def __init__(self, skel):
+        self.skel = skel
+
+
+class AnimPoseExtensions:
+    @staticmethod
+    def get_reference_pose(skel):
+        return _Pose(skel)
+
+    @staticmethod
+    def get_bone_names(pose):
+        return [Name(b) for b in pose.skel.bones]
+
+    @staticmethod
+    def get_bone_pose(pose, bone, space=0):
+        r = pose.skel.ref.get(bone, {"pitch": 0, "yaw": 0, "roll": 0})
+        rot = Rotator()
+        rot.pitch, rot.yaw, rot.roll = r["pitch"], r["yaw"], r["roll"]
+        return Transform(Vector(0, 0, 10), rot.quaternion())
+
+
+class _Binding:
+    def __init__(self, actor):
+        self.actor = actor
+
+    def get_display_name(self):
+        return Text(self.actor.get_actor_label())
+
+
+class LevelSequence(Object):
+    def __init__(self, name, path):
+        super().__init__(name, path)
+        self.bindings, self.rig, self.end, self.rate = [], None, 0, None
+
+    def set_display_rate(self, rate):
+        self.rate = rate
+
+    def set_playback_start(self, f):
+        pass
+
+    def set_playback_end(self, f):
+        self.end = f
+
+    def add_possessable(self, actor):
+        b = _Binding(actor)
+        self.bindings.append(b)
+        return b
+
+    def get_bindings(self):
+        return list(self.bindings)
+
+
+class FKControlRig(Object):
+    pass
+
+
+class _FakeRig(Object):
+    def __init__(self, cls_name="FKControlRig"):
+        super().__init__("Rig")
+        self.keys = {}
+        self._cls = cls_name
+
+    def get_class(self):
+        return _Cls(self._cls)
+
+
+class _Proxy:
+    def __init__(self, rig):
+        self.control_rig = rig
+
+
+class ControlRigSequencerLibrary:
+    @staticmethod
+    def find_or_create_control_rig_track(world, seq, cls, binding):
+        seq.rig = _FakeRig()
+        return object()
+
+    @staticmethod
+    def get_control_rigs(seq):
+        return [_Proxy(seq.rig)] if seq.rig else []
+
+    @staticmethod
+    def get_local_control_rig_euler_transform(seq, rig, name, frame, unit):
+        return EulerTransform()
+
+    @staticmethod
+    def set_local_control_rig_euler_transform(seq, rig, name, frame, value, unit, set_key):
+        rig.keys[(str(name), frame.value)] = value.rotation
+
+
+class LevelSequenceEditorBlueprintLibrary:
+    current = None
+
+    @staticmethod
+    def open_level_sequence(seq):
+        return True
+
+    @staticmethod
+    def set_current_time(frame):
+        LevelSequenceEditorBlueprintLibrary.current = frame
+
+
+class _Controller:
+    def __init__(self):
+        self.tracks, self.frames, self.brackets = {}, 0, 0
+
+    def open_bracket(self, text, undo=True):
+        self.brackets += 1
+
+    def close_bracket(self, undo=True):
+        self.brackets -= 1
+
+    def set_frame_rate(self, rate, undo=True):
+        self.rate = rate
+
+    def set_number_of_frames(self, n, undo=True):
+        self.frames = n.value
+
+    def add_bone_curve(self, bone, undo=True):
+        self.tracks.setdefault(bone, None)
+        return True
+
+    def set_bone_track_keys(self, bone, pos, rot, scale, undo=True):
+        self.tracks[bone] = (pos, rot, scale)
+        return True
+
+
+class _NotifyEvent:
+    def __init__(self, obj, track_index, time, duration, is_state):
+        self.obj, self.track_index, self.time, self.duration, self.is_state = obj, track_index, time, duration, is_state
+
+    def get_editor_property(self, name):
+        if name == "notify":
+            return None if self.is_state else self.obj
+        if name == "notify_state_class":
+            return self.obj if self.is_state else None
+        if name == "track_index":
+            return self.track_index
+        if name == "notify_name":
+            return Name(type(self.obj).__name__)
+        raise AttributeError(name)
+
+
+class AnimSequenceBase(Object):
+    def __init__(self, name, path, length=1.0):
+        super().__init__(name, path)
+        self.length = length
+        self.notify_tracks = []
+        self.events = []
+
+    def get_play_length(self):
+        return self.length
+
+
+class AnimSequence(AnimSequenceBase):
+    def __init__(self, name, path, length=1.0):
+        super().__init__(name, path, length)
+        self.controller = _Controller()
+        self.exported_from = None
+
+
+class _Segment(Object):
+    pass
+
+
+class _AnimTrack(Object):
+    pass
+
+
+class _SlotTrack(Object):
+    pass
+
+
+class AnimMontage(AnimSequenceBase):
+    def __init__(self, name, path, anim=None):
+        super().__init__(name, path, anim.length if anim else 1.0)
+        seg = _Segment()
+        seg._props.update({"anim_reference": anim, "anim_start_time": 0.0, "anim_end_time": self.length})
+        at = _AnimTrack()
+        at._props["anim_segments"] = [seg]
+        st = _SlotTrack()
+        st._props.update({"slot_name": Name("DefaultSlot"), "anim_track": at})
+        self._props["slot_anim_tracks"] = [st]
+
+
+class AnimNotify(Object):
+    pass
+
+
+class AnimNotifyState(Object):
+    pass
+
+
+class AnimNotify_PlayNiagaraEffect(AnimNotify):
+    def __init__(self):
+        super().__init__()
+        self._props.update({"template": None, "socket_name": Name(""), "location_offset": Vector(), "attached": True})
+
+
+class AnimNotifyState_TimedNiagaraEffect(AnimNotifyState):
+    def __init__(self):
+        super().__init__()
+        self._props.update({"template": None, "socket_name": Name("")})
+
+
+class AnimNotifyState_ConanDamageWindow(AnimNotifyState):
+    def __init__(self):
+        super().__init__()
+        self._props.update({"damage_multiplier": 1.0, "trace_socket": Name("weapon_r")})
+
+
+class NiagaraSystem(Object):
+    pass
+
+
+class AnimationLibrary:
+    @staticmethod
+    def get_sequence_length(anim):
+        return anim.length
+
+    @staticmethod
+    def get_num_frames(anim):
+        return int(round(anim.length * 30))
+
+    @staticmethod
+    def get_animation_notify_track_names(anim):
+        return [Name(t) for t in anim.notify_tracks]
+
+    @staticmethod
+    def add_animation_notify_track(anim, name, color=None):
+        anim.notify_tracks.append(str(name))
+
+    @staticmethod
+    def add_animation_notify_event(anim, track, time, cls):
+        if time < 0 or time > anim.length:
+            return None
+        cls = globals()[cls.get_name()] if isinstance(cls, _Cls) else cls
+        obj = cls() if isinstance(cls, type) else None
+        anim.events.append(_NotifyEvent(obj, anim.notify_tracks.index(track), time, 0.0, False))
+        return obj
+
+    @staticmethod
+    def add_animation_notify_state_event(anim, track, time, duration, cls):
+        cls = globals()[cls.get_name()] if isinstance(cls, _Cls) else cls
+        obj = cls()
+        anim.events.append(_NotifyEvent(obj, anim.notify_tracks.index(track), time, duration, True))
+        return obj
+
+    @staticmethod
+    def get_animation_notify_events(anim):
+        return list(anim.events)
+
+    @staticmethod
+    def get_anim_notify_event_trigger_time(ev):
+        return ev.time
+
+    @staticmethod
+    def get_anim_notify_event_duration(ev):
+        return ev.duration
+
+    @staticmethod
+    def remove_animation_notify_events_by_track(anim, track):
+        idx = anim.notify_tracks.index(track)
+        before = len(anim.events)
+        anim.events = [e for e in anim.events if e.track_index != idx]
+        return before - len(anim.events)
+
+
+class LevelSequenceFactoryNew(Object):
+    pass
+
+
+class AnimSequenceFactory(Object):
+    pass
+
+
+class AnimMontageFactory(Object):
+    pass
+
+
+class AnimSeqExportOption(Object):
+    pass
+
+
+class _AssetTools:
+    def create_asset(self, name, folder, cls, factory):
+        path = f"{folder}/{name}"
+        if path in ENGINE.assets:
+            return None
+        if cls is LevelSequence:
+            asset = LevelSequence(name, path)
+        elif cls is AnimSequence:
+            asset = AnimSequence(name, path)
+        elif cls is AnimMontage:
+            asset = AnimMontage(name, path, factory.get_editor_property("source_animation"))
+        else:
+            asset = cls(name, path)
+        return ENGINE.add_asset(path, asset)
+
+
+class AssetToolsHelpers:
+    @staticmethod
+    def get_asset_tools():
+        return _AssetTools()
+
+
+class SequencerTools:
+    @staticmethod
+    def export_anim_sequence(world, seq, anim, opts, binding, link):
+        anim.exported_from = seq
+        anim.length = seq.end / 30.0
+        return True
+
+
+def _duplicate_asset(src, dst):
+    a = ENGINE.assets.get(src.split(".")[0])
+    if a is None or dst in ENGINE.assets:
+        return False
+    new = _copy.deepcopy(a)
+    new._name, new._path = dst.rsplit("/", 1)[-1], dst
+    ENGINE.assets[dst] = new
+    return True
+
+
+EditorAssetLibrary.duplicate_asset = staticmethod(_duplicate_asset)
+
+_orig_spawn = EditorActorSubsystem.spawn_actor_from_object
+
+
+def _spawn_from_object(self, obj, location, rotation=None, transient=False):
+    if isinstance(obj, SkeletalMesh):
+        a = SkeletalMeshActor(obj.get_name(), (location.x, location.y, location.z), extent=(40, 40, 90))
+        if rotation is not None:
+            a._rot = rotation
+        return ENGINE.add_actor(a)
+    return _orig_spawn(self, obj, location, rotation, transient)
+
+
+EditorActorSubsystem.spawn_actor_from_object = _spawn_from_object
+
+
+# ---------------------------------------------------------------------------
+# Asset import (Tripo integration)
+# ---------------------------------------------------------------------------
+
+class _ImportData(Object):
+    pass
+
+
+class FbxImportUI(Object):
+    def __init__(self):
+        super().__init__()
+        self._props.update({"static_mesh_import_data": _ImportData(), "skeletal_mesh_import_data": _ImportData()})
+
+
+class AssetImportTask(Object):
+    def __init__(self):
+        super().__init__()
+        self._props["imported_object_paths"] = []
+
+
+def _import_asset_tasks(self, tasks):
+    for t in tasks:
+        fn = t.get_editor_property("filename")
+        if not _os.path.exists(fn):
+            continue
+        dest, name = t.get_editor_property("destination_path"), t.get_editor_property("destination_name")
+        skeletal = False
+        try:
+            skeletal = t.get_editor_property("options").get_editor_property("import_as_skeletal")
+        except Exception:
+            pass
+        path = f"{dest}/{name}"
+        asset = (SkeletalMesh(name, path, None) if skeletal else StaticMesh(name, path))
+        ENGINE.add_asset(path, asset)
+        t.set_editor_property("imported_object_paths", [f"{path}.{name}"])
+
+
+_AssetTools.import_asset_tasks = _import_asset_tasks

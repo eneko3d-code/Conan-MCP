@@ -387,7 +387,8 @@ def test_skills_are_served_as_prompts():
     from conan_mcp.prompts import load_skills
     names = {s["name"] for s in load_skills()}
     assert {"conan-map-design", "conan-landscape-sculpting", "conan-structures", "conan-items-recipes",
-            "conan-blueprint-authoring", "conan-mod-release", "conan-mcp-safety"} <= names
+            "conan-blueprint-authoring", "conan-mod-release", "conan-mcp-safety",
+            "conan-animation-from-reference", "conan-custom-attacks-vfx", "conan-tripo-assets"} <= names
     for s in load_skills():
         assert s.get("description"), s["name"]
     msg = prompt_registry.get_prompt("conan-map-design", {"goal": "Add a desert village"})

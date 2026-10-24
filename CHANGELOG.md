@@ -1,5 +1,50 @@
 # Changelog
 
+## 2.2.0 — Tripo AI integration
+- 15 new tools (128 in total):
+  - account and tasks: `tripo_get_balance`, `tripo_get_task`, `tripo_list_tasks`, `tripo_upload_file`;
+  - generation: `tripo_text_to_model`, `tripo_image_to_model`, `tripo_multiview_to_model`, `tripo_text_to_image`;
+  - processing: `tripo_texture_model`, `tripo_retopology`, `tripo_convert`;
+  - rigging and animation: `tripo_rig_check`, `tripo_rig`, `tripo_retarget`;
+  - import: `tripo_import_result` (download plus import into `/Game/Mods/<Mod>/Tripo`).
+- Spending control: balance check before every task, plan-only unless `confirm_spend=true`, session budget
+  `CONAN_MCP_TRIPO_BUDGET`, minimum balance `CONAN_MCP_TRIPO_MIN_BALANCE`, real `credits_consumed` accounting,
+  and no retries after error 2010.
+- Security:
+  - the API key is read from `TRIPO_API_KEY` and never stored or echoed;
+  - downloads only from HTTPS Tripo hosts;
+  - uploads only from `Saved/ConanMCP`.
+- Tools can now run off the Game Thread (network work never freezes the editor). The `openWorldHint` annotation
+  is set for Tripo tools.
+- Skill `conan-tripo-assets` and `docs/tripo.md`. Fake Tripo v3 server tests (102 tests in total).
+
+## 2.1.0 — Animation with Control Rig, custom attacks and abilities with particles
+### New: 16 tools (113 in total)
+- **Posing by role**: `get_skeleton_roles` maps Unreal, Biped, Mixamo and creature skeletons to roles
+  (`upperarm_r`, `spine_2`, `tail_3`, `front_foot_l`...). Also `get_reference_pose` and `get_control_rig_controls`.
+- **Authoring**:
+  - `create_animation_preview`: preview character, LevelSequence and an FK or custom Control Rig track;
+  - `set_pose_keys`: additive or absolute degrees, joint limits, dry run;
+  - `generate_attack_keys`: attack/ability timing templates with overshoot and settle.
+- **Visual loop**: `capture_animation_frames` returns multi-frame images from front, side, three-quarter, back or top views.
+- **Output**:
+  - `bake_animation`: from the Control Rig sequence, or directly from the keys when Control Rig is unavailable;
+  - `create_montage`: new, or from a vanilla template that keeps its gameplay notifies.
+- **Notifies and VFX**:
+  - `add_animation_notify`: Niagara/Cascade bursts, timed effects, trails, sounds and custom classes;
+  - `copy_animation_notifies`: vanilla damage windows, re-timed;
+  - `remove_animation_notifies` and `duplicate_asset`;
+  - `preview_ability`: shows the move with its particles and returns captures.
+- **Inspection**: `find_animations` and `get_animation_info` (notifies with times and properties, montage slots and sections).
+
+### New skills
+- `conan-animation-from-reference`: reference reading, axis calibration, role posing, compare loop, timing rules.
+- `conan-custom-attacks-vfx`: vanilla study, playable montage, particles/trails/sound, hooking into game data, limits.
+
+### Other
+- `get_server_capabilities` reports Control Rig, Sequencer, notify and Niagara APIs.
+- `docs/animation.md` with a complete walkthrough. 14 new tests (88 in total), including the full pipeline on the fake editor.
+
 ## 2.0.0 — Mapping, terrain, structures, DataTables, Blueprints, mod workflow and skills
 ### New: 51 tools (97 in total)
 - **Mapping**: `analyze_terrain` (height and slope stats, walkable %, flat build sites, recommendations),
