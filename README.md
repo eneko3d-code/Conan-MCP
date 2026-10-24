@@ -14,7 +14,7 @@
 
 **The ultimate bridge connecting modern AI Agents (Google Antigravity, Cursor, Claude Code) directly to the Conan Exiles Enhanced DevKit editor.**
 
-[Installation](#-step-by-step-installation) • [Tools (113)](#-what-it-can-do-113-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
+[Installation](#-step-by-step-installation) • [Tools (128)](#-what-it-can-do-128-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
 
 </div>
 
@@ -48,7 +48,9 @@ It lets AI agents (Claude Code, Cursor, Google Antigravity...) **see and edit** 
    bone roles, compares captures with the reference, builds attack timing, bakes the AnimSequence and makes the montage.
 7. **Custom attacks and abilities with particles**: reuse a vanilla attack's damage windows, add Niagara/Cascade bursts,
    trails and sounds at sockets, preview them on the character and hook the montage into the game data.
-8. **Mod workflow**: folder layout, broken references, cross-mod dependencies, unsaved packages, rename/move, and a release audit.
+8. **Tripo AI assets**: generate, texture, retopologise, rig and animate 3D models with your Tripo credits
+   (always with your approval and a session budget), then import them into the mod and place them.
+9. **Mod workflow**: folder layout, broken references, cross-mod dependencies, unsaved packages, rename/move, and a release audit.
 
 Every edit runs on the Game Thread inside an **undoable transaction** (`undo` tool or Ctrl+Z), and every bulk edit supports `dry_run`.
 
@@ -107,6 +109,7 @@ http://127.0.0.1:8123/mcp
 | `CONAN_MCP_HOST` / `CONAN_MCP_PORT` | `127.0.0.1` / `8123` | Bind address and port. |
 | `CONAN_MCP_TIMEOUT` | `30` | Seconds a tool may wait for the Game Thread. |
 | `CONAN_MCP_MAX_ACTORS` | `200` | Hard limit of actors per bulk write (spawn, scatter, delete...). |
+| `TRIPO_API_KEY` | *(empty)* | Enables the Tripo AI tools ([docs/tripo.md](docs/tripo.md)). Budget: `CONAN_MCP_TRIPO_BUDGET`. |
 | `CONAN_MCP_EXTRA_PATHS` | *(empty)* | Extra Python paths (separated by `;`) to add at startup. |
 
 Requests carrying a non-loopback `Origin` or `Host` header are rejected (protects against malicious web pages and DNS rebinding), and package paths must live under `/Game`, `/Engine` or `/ConanSandbox`.
@@ -120,12 +123,12 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "2.1.0",
+  "version": "2.2.0",
   "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
-  "registered_tools": 113,
+  "registered_tools": 128,
   "registered_resources": 4,
-  "registered_prompts": 13,
+  "registered_prompts": 14,
   "sse_endpoint": "/sse",
   "messages_endpoint": "/messages"
 }
@@ -174,7 +177,7 @@ Add to your agent or workspace MCP configuration:
 
 ---
 
-## 🛠️ What it can do (113 tools)
+## 🛠️ What it can do (128 tools)
 
 Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generated from the code).
 
@@ -188,6 +191,7 @@ Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generate
 | **DataTables** | `get_datatable_row`, `get_datatable_schema`, `search_datatable_rows`, `add/update/duplicate/remove_datatable_row`, `export_datatable`, `import_datatable` | READ / WRITE |
 | **Blueprints** | `get_blueprint_info`, `compile_blueprint`, `add_blueprint_variable`, `set_blueprint_default`, `add_blueprint_component`, `reparent_blueprint` | READ / WRITE |
 | **Animation** | `get_skeleton_roles`, `create_animation_preview`, `set_pose_keys`, `generate_attack_keys`, `capture_animation_frames`, `bake_animation`, `create_montage`, `copy_animation_notifies`, `add_animation_notify`, `preview_ability`, `get_animation_info`, `find_animations` | READ / WRITE |
+| **Tripo** | `tripo_get_balance`, `tripo_text_to_model`, `tripo_image_to_model`, `tripo_multiview_to_model`, `tripo_text_to_image`, `tripo_texture_model`, `tripo_retopology`, `tripo_convert`, `tripo_rig`, `tripo_retarget`, `tripo_get_task`, `tripo_import_result` | READ / WRITE (spends credits only with `confirm_spend`) |
 | **Mod** | `create_mod_structure`, `validate_assets`, `audit_mod`, `get_asset_referencers`, `list_dirty_packages`, `save_all_dirty`, `rename_asset`, `delete_asset` | READ / WRITE / DESTRUCTIVE |
 | **Assets, Actors, Editor, Skeletons, Particles, Conan** | the original v1 tools (asset search, creation, actor info, sockets, VFX preview, Conan catalog searches) | READ / WRITE |
 | **Scripting** | `execute_python`, disabled by default | DESTRUCTIVE |
@@ -198,7 +202,7 @@ Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generate
 
 The plugin ships playbooks in [`skills/`](skills) that give the agent a method and real criteria, not just tools:
 `conan-map-design`, `conan-landscape-sculpting`, `conan-structures`, `conan-items-recipes`, `conan-blueprint-authoring`,
-`conan-animation-from-reference`, `conan-custom-attacks-vfx`, `conan-mod-release` and `conan-mcp-safety`.
+`conan-animation-from-reference`, `conan-custom-attacks-vfx`, `conan-tripo-assets`, `conan-mod-release` and `conan-mcp-safety`.
 
 - **Every MCP client** gets them as **MCP prompts** automatically (`prompts/list`).
 - **Claude Code / Antigravity** can also install them as native skills. See [docs/skills.md](docs/skills.md).
@@ -211,6 +215,13 @@ Paste a reference image into your AI client and ask, for example, *"make this ov
 trail and an explosion on impact"*. The agent follows the `conan-animation-from-reference` and `conan-custom-attacks-vfx` skills:
 it calibrates the rig, poses it with Control Rig, compares captures with your image, generates the timing, then bakes the
 animation, builds the montage, copies the vanilla damage windows and adds the particles. Full walkthrough: [docs/animation.md](docs/animation.md).
+
+---
+
+## 🧊 Tripo AI
+
+With `TRIPO_API_KEY` set, the agent can create assets with Tripo and bring them into your mod. Before each task it
+checks your balance and shows you a plan, and it only spends after you confirm. Setup and examples: [docs/tripo.md](docs/tripo.md).
 
 ---
 
@@ -227,7 +238,7 @@ layer painting and exact Blueprint compiler messages. See [docs/native_module.md
 - `devkit://status`, `devkit://logs/recent`, `devkit://outliner`, `conan://tables`, `conan://asset/{package_path}`
 
 ### Prompts (`prompts/get`)
-- The 9 skills above, plus `create-conan-item-mod`, `audit-level-performance`, `inspect-character-skeleton` and `debug-niagara-vfx`.
+- The 10 skills above, plus `create-conan-item-mod`, `audit-level-performance`, `inspect-character-skeleton` and `debug-niagara-vfx`.
 
 ---
 
@@ -244,9 +255,9 @@ graph TD
     subgraph "Conan Exiles DevKit editor"
         T["HTTP /mcp + SSE /sse (loopback, Origin/Host checks, optional token)"]
         P["JSON-RPC engine: schema + path validation, security levels"]
-        R["Registry: 113 tools · 13 prompts (skills) · 5 resources"]
+        R["Registry: 128 tools · 14 prompts (skills) · 5 resources"]
         D["Game Thread dispatcher (timeouts, deferred multi-frame work)"]
-        TL["Tool modules: mapping · landscape · capture · level · datatables · blueprints · animation · mod · builtin"]
+        TL["Tool modules: mapping · landscape · capture · level · datatables · blueprints · animation · tripo · mod · builtin"]
         N["Optional C++ ConanMCPNative (landscape edit, BP compiler)"]
         E["Unreal Editor (undoable transactions)"]
     end
@@ -259,7 +270,7 @@ graph TD
 
 ## 🧪 Testing & Verification
 
-- `python -m pytest tests` runs 88 tests on any machine, no Unreal needed. They cover:
+- `python -m pytest tests` runs 102 tests on any machine, no Unreal needed. They cover:
   - the JSON-RPC engine and the security policy;
   - the HTTP and SSE transports;
   - the terrain and brush math, the 16-bit PNG codec, scatter and placement rules;

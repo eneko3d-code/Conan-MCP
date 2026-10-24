@@ -26,7 +26,7 @@ El plugin **ConanMCP** fue diseñado bajo el principio de **Mínimo Privilegio**
 
 ## 2. Clasificación de Herramientas y Matriz de Autorización
 
-Cada una de las 113 herramientas del servidor tiene asignado un nivel de seguridad inmutable:
+Cada una de las 128 herramientas del servidor tiene asignado un nivel de seguridad inmutable:
 
 | Nivel de Seguridad | Descripción | Soporte de Undo/Redo | Estado por Defecto |
 |---|---|---|---|
@@ -54,6 +54,12 @@ Si un cliente MCP intenta ejecutar una herramienta que requiere un permiso desac
 - `delete_actors` nunca toca Landscape, WorldSettings, foliage ni otros actores críticos salvo `allow_protected=true`, y exige un filtro o una lista explícita.
 - Las DataTables fuera de `/Game/Mods` son de solo lectura salvo `allow_base_game_table=true`.
 - Los ficheros (heightmaps, capturas, exportaciones) solo se leen y escriben en `<Proyecto>/Saved/ConanMCP/` y solo con nombres de fichero simples.
+
+### Integración Tripo AI (2.2)
+- El servidor solo hace conexiones salientes a la API de Tripo y a sus hosts de descarga (HTTPS, lista `CONAN_MCP_TRIPO_DOWNLOAD_HOSTS`), y solo si existe la variable `TRIPO_API_KEY`.
+- La clave nunca se guarda en disco ni aparece en respuestas o logs.
+- Toda tarea que gasta créditos comprueba primero el saldo y requiere `confirm_spend=true`. Existe un tope por sesión (`CONAN_MCP_TRIPO_BUDGET`). Tras el error 2010 (sin créditos) no se reintenta nunca.
+- Las subidas solo admiten ficheros de `Saved/ConanMCP` y las importaciones solo se crean en `/Game/Mods/`.
 
 ## 3. Soporte Transaccional de Editor (`Ctrl+Z` / Deshacer)
 

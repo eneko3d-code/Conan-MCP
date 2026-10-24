@@ -16,7 +16,7 @@ from conan_mcp.core.registry import prompt_registry, registry, resource_registry
 from conan_mcp.server import register_everything  # noqa: E402
 
 ORDER = ["System", "Mapping", "Landscape", "Capture", "Level", "Actors", "Editor", "Assets", "DataTables",
-         "Blueprints", "Animation", "Mod", "Skeletons", "Particles", "Conan", "Scripting"]
+         "Blueprints", "Animation", "Tripo", "Mod", "Skeletons", "Particles", "Conan", "Scripting"]
 
 
 def _arg_line(name, spec, required):

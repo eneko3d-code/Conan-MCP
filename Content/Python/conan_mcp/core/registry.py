@@ -14,7 +14,10 @@ class ToolRegistry:
         self.tools.clear()
 
     def register(self, name: str, category: str, description: str, input_schema: dict,
-                 security_level: str, handler: Callable, idempotent: Optional[bool] = None):
+                 security_level: str, handler: Callable, idempotent: Optional[bool] = None,
+                 off_game_thread: bool = False, open_world: bool = False):
+        """off_game_thread: the handler does network/IO work and must not block the Game Thread;
+        it runs on the request thread and uses execute_on_game_thread() itself for engine calls."""
         if "type" not in input_schema:
             input_schema = {"type": "object", **input_schema}
         self.tools[name] = {
@@ -26,6 +29,8 @@ class ToolRegistry:
             "security": security_level,
             "handler": handler,
             "idempotent": security_level == READ_ONLY if idempotent is None else idempotent,
+            "off_game_thread": off_game_thread,
+            "open_world": open_world,
         }
 
     def tool(self, name: str, category: str, description: str, security_level: str,
@@ -51,7 +56,7 @@ class ToolRegistry:
                 "readOnlyHint": t["security"] == READ_ONLY,
                 "destructiveHint": t["security"] == DESTRUCTIVE,
                 "idempotentHint": bool(t["idempotent"]),
-                "openWorldHint": False,
+                "openWorldHint": bool(t.get("open_world")),
             },
         } for t in self.tools.values()]
 

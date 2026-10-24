@@ -1,5 +1,23 @@
 # Changelog
 
+## 2.2.0 — Tripo AI integration
+- 15 new tools (128 in total):
+  - account and tasks: `tripo_get_balance`, `tripo_get_task`, `tripo_list_tasks`, `tripo_upload_file`;
+  - generation: `tripo_text_to_model`, `tripo_image_to_model`, `tripo_multiview_to_model`, `tripo_text_to_image`;
+  - processing: `tripo_texture_model`, `tripo_retopology`, `tripo_convert`;
+  - rigging and animation: `tripo_rig_check`, `tripo_rig`, `tripo_retarget`;
+  - import: `tripo_import_result` (download plus import into `/Game/Mods/<Mod>/Tripo`).
+- Spending control: balance check before every task, plan-only unless `confirm_spend=true`, session budget
+  `CONAN_MCP_TRIPO_BUDGET`, minimum balance `CONAN_MCP_TRIPO_MIN_BALANCE`, real `credits_consumed` accounting,
+  and no retries after error 2010.
+- Security:
+  - the API key is read from `TRIPO_API_KEY` and never stored or echoed;
+  - downloads only from HTTPS Tripo hosts;
+  - uploads only from `Saved/ConanMCP`.
+- Tools can now run off the Game Thread (network work never freezes the editor). The `openWorldHint` annotation
+  is set for Tripo tools.
+- Skill `conan-tripo-assets` and `docs/tripo.md`. Fake Tripo v3 server tests (102 tests in total).
+
 ## 2.1.0 — Animation with Control Rig, custom attacks and abilities with particles
 ### New: 16 tools (113 in total)
 - **Posing by role**: `get_skeleton_roles` maps Unreal, Biped, Mixamo and creature skeletons to roles

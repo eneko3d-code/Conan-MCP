@@ -926,3 +926,43 @@ def _spawn_from_object(self, obj, location, rotation=None, transient=False):
 
 
 EditorActorSubsystem.spawn_actor_from_object = _spawn_from_object
+
+
+# ---------------------------------------------------------------------------
+# Asset import (Tripo integration)
+# ---------------------------------------------------------------------------
+
+class _ImportData(Object):
+    pass
+
+
+class FbxImportUI(Object):
+    def __init__(self):
+        super().__init__()
+        self._props.update({"static_mesh_import_data": _ImportData(), "skeletal_mesh_import_data": _ImportData()})
+
+
+class AssetImportTask(Object):
+    def __init__(self):
+        super().__init__()
+        self._props["imported_object_paths"] = []
+
+
+def _import_asset_tasks(self, tasks):
+    for t in tasks:
+        fn = t.get_editor_property("filename")
+        if not _os.path.exists(fn):
+            continue
+        dest, name = t.get_editor_property("destination_path"), t.get_editor_property("destination_name")
+        skeletal = False
+        try:
+            skeletal = t.get_editor_property("options").get_editor_property("import_as_skeletal")
+        except Exception:
+            pass
+        path = f"{dest}/{name}"
+        asset = (SkeletalMesh(name, path, None) if skeletal else StaticMesh(name, path))
+        ENGINE.add_asset(path, asset)
+        t.set_editor_property("imported_object_paths", [f"{path}.{name}"])
+
+
+_AssetTools.import_asset_tasks = _import_asset_tasks

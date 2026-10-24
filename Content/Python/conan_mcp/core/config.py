@@ -7,7 +7,7 @@ editor can change them without restarting the server.
 import os
 
 SERVER_NAME = "conan-devkit-mcp"
-SERVER_VERSION = "2.1.0"
+SERVER_VERSION = "2.2.0"
 PROTOCOL_VERSION = "2024-11-05"
 
 BIND_ADDRESS = os.environ.get("CONAN_MCP_HOST", "127.0.0.1")
@@ -39,3 +39,12 @@ SAVED_SUBDIR = "ConanMCP"
 
 # Optional extra sys.path entries (Unreal experimental toolsets), separated by os.pathsep
 EXTRA_PYTHON_PATHS = [p for p in os.environ.get("CONAN_MCP_EXTRA_PATHS", "").split(os.pathsep) if p]
+
+# Tripo AI integration (network access only to Tripo; the API key is read from TRIPO_API_KEY at call time)
+TRIPO_BASE_URL = os.environ.get("CONAN_MCP_TRIPO_BASE_URL", "https://openapi.tripo3d.com/v3")
+# Session spending cap in credits (0 = no cap) and minimum balance to keep
+TRIPO_BUDGET = float(os.environ.get("CONAN_MCP_TRIPO_BUDGET", 0) or 0)
+TRIPO_MIN_BALANCE = float(os.environ.get("CONAN_MCP_TRIPO_MIN_BALANCE", 0) or 0)
+# Hosts results may be downloaded from (suffix match)
+TRIPO_DOWNLOAD_HOSTS = tuple(h.strip().lower() for h in os.environ.get(
+    "CONAN_MCP_TRIPO_DOWNLOAD_HOSTS", "tripo3d.ai,tripo3d.com").split(",") if h.strip())

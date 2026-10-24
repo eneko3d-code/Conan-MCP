@@ -55,6 +55,13 @@ def tool_get_server_capabilities(args):
             "max_actors_per_write": config.MAX_ACTORS_PER_WRITE,
         },
         "files_dir": ue.saved_dir() if ue.unreal is not None else None,
+        "tripo": {
+            "api_key_configured": bool(os.environ.get("TRIPO_API_KEY", "").strip()),
+            "base_url": config.TRIPO_BASE_URL,
+            "session_budget": config.TRIPO_BUDGET or None,
+            "min_balance": config.TRIPO_MIN_BALANCE or None,
+            "note": "Set TRIPO_API_KEY to enable the tripo_* tools; every spend needs confirm_spend=true.",
+        },
     }
 
 
