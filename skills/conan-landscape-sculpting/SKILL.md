@@ -19,6 +19,19 @@ Call `get_landscape_info` and read `editing_backend`:
 level (for example `/Game/Dev/AlmostEmpty`). Continue only if `result: ok` and `altered_heights: 0`.
 Note `read_s`, which tells you how long each stroke will take.
 
+**Reading the results of a write:**
+- `read_attempts > 1`: the first exports of a session can come back empty while the editor compiles the
+  export shader. The tool re-exports on later ticks, and **writes nothing** until a read is valid.
+- `members`: the landscape actors that were edited. Separate landscapes or tiles are never merged.
+- `trace_check`: exported heights compared with line traces on the landscape before writing.
+  - `ok`: they match.
+  - `mismatch`: the write was refused.
+  - `insufficient`: there were not enough visible landscape points, for example because they are covered by
+    structures or have no collision. Look at the result yourself with `capture_map_overview` before continuing.
+- `trace_check_after` and `verified`: checks after writing. On a mismatch the backup is restored automatically.
+  - `verified: "inconclusive"`: the landscape could not be re-read. Check it visually and use
+    `restore_heightmap_backup` if it looks wrong.
+
 **Undo:** `undo` (Ctrl+Z) may revert an import. The guaranteed way back is `restore_heightmap_backup` with
 the `backup` file named in each stroke's result.
 

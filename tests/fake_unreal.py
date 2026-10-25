@@ -1061,16 +1061,38 @@ class _RenderingLibrary:
 class LandscapeProxy(Actor):
     """Holds a heightmap; export/import go through render targets like the engine."""
 
-    def init_heights(self, size):
+    def init_heights(self, size, base=32768):
         self.size = size
-        self.heights = _hm.HeightGrid(size, size, [32768 + ((x * 7 + y * 13) % 900) for y in range(size) for x in range(size)])
+        self.heights = _hm.HeightGrid(size, size, [base + ((x * 7 + y * 13) % 900) for y in range(size) for x in range(size)])
         self.weights = {}
         self.imports = 0
+        self.exports = 0
+        self.blank_exports = 0     # first N exports render nothing (shader not compiled yet)
+        self.corrupt_export = None  # callable(grid) -> grid, to simulate wrong reads
+        self.owner = self
+
+    def get_landscape_actor(self):
+        return self.owner
 
     def landscape_export_heightmap_to_render_target(self, rt, rg=False, proxies=True):
-        assert rg and (rt.w, rt.h) == (self.size, self.size)
-        rt.bytes[:] = _hm.pack_rg(self.heights)
+        assert rg and (rt.w, rt.h) == (self.size, self.size), f"RT {rt.w}x{rt.h} != landscape {self.size}x{self.size}"
+        self.exports += 1
+        if self.blank_exports:
+            self.blank_exports -= 1
+            rt.bytes[:] = bytes(len(rt.bytes))
+            return True
+        grid = self.corrupt_export(self.heights.copy()) if self.corrupt_export else self.heights
+        rt.bytes[:] = _hm.pack_rg(grid)
         return True
+
+    def z_at(self, x, y):
+        """World Z of the nearest vertex under (x, y), or None outside this landscape."""
+        origin, extent = self.get_actor_bounds()
+        gx = int(round((x - (origin.x - extent.x)) / self._scale.x))
+        gy = int(round((y - (origin.y - extent.y)) / self._scale.y))
+        if not (0 <= gx < self.size and 0 <= gy < self.size):
+            return None
+        return self._loc.z + (self.heights.get(gx, gy) - 32768) * self._scale.z / 128.0
 
     def landscape_import_heightmap_from_render_target(self, rt, rg=False):
         assert rg and (rt.w, rt.h) == (self.size, self.size)
@@ -1093,15 +1115,36 @@ class LandscapeStreamingProxy(LandscapeProxy):
     pass
 
 
-RT_APIS = {"LandscapeProxy": LandscapeProxy, "RenderingLibrary": _RenderingLibrary, "LinearColor": LinearColor,
+class _RTSystemLibrary(SystemLibrary):
+    """Line traces that hit the render-target landscapes at their real heights."""
+
+    @staticmethod
+    def line_trace_single(world, start, end, *a):
+        for land in ENGINE.actors:
+            if isinstance(land, LandscapeProxy):
+                z = land.z_at(start.x, start.y)
+                if z is not None:
+                    return HitResult(Vector(start.x, start.y, z), Vector(0, 0, 1), land)
+        return None
+
+
+class _RTGameplayStatics(GameplayStatics):
+    @staticmethod
+    def break_hit_result(hit):
+        return (True, False, 0.5, 10.0, hit.loc, hit.loc, hit.normal, hit.normal, None, hit.actor, None,
+                Name(""), Name(""), 0, 0, 0, Vector(), Vector())
+
+
+RT_APIS = {"LandscapeProxy": LandscapeProxy, "SystemLibrary": _RTSystemLibrary, "Actor": Actor, "RenderingLibrary": _RenderingLibrary, "LinearColor": LinearColor,
            "Vector2D": Vector2D, "TextureRenderTargetFormat": TextureRenderTargetFormat, "BlendMode": BlendMode,
            "TextureFilter": TextureFilter, "LandscapeStreamingProxy": LandscapeStreamingProxy}
 
 
-def make_rt_landscape(cls=None, size=65, label="Landscape"):
-    """Landscape whose bounds cover size x size vertices at 100 cm, min corner at world (0, 0)."""
+def make_rt_landscape(cls=None, size=65, label="Landscape", min_corner=(0.0, 0.0), base=32768):
+    """Landscape whose bounds cover size x size vertices at 100 cm, min corner at world ``min_corner``."""
     half = (size - 1) * 50.0
-    land = (cls or LandscapeRT)(label, (half, half, 0.0), extent=((size - 1) / 2.0, (size - 1) / 2.0, 10.0))
+    land = (cls or LandscapeRT)(label, (min_corner[0] + half, min_corner[1] + half, 0.0),
+                                extent=((size - 1) / 2.0, (size - 1) / 2.0, 10.0))
     land.set_actor_scale3d(Vector(100, 100, 100))
-    land.init_heights(size)
+    land.init_heights(size, base)
     return ENGINE.add_actor(land)

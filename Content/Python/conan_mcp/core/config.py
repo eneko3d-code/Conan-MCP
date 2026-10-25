@@ -7,7 +7,7 @@ editor can change them without restarting the server.
 import os
 
 SERVER_NAME = "conan-devkit-mcp"
-SERVER_VERSION = "2.2.1"
+SERVER_VERSION = "2.2.2"
 PROTOCOL_VERSION = "2024-11-05"
 
 BIND_ADDRESS = os.environ.get("CONAN_MCP_HOST", "127.0.0.1")
@@ -34,6 +34,8 @@ ALLOWED_LOCAL_HOSTS = ("127.0.0.1", "localhost", "[::1]", "::1")
 # Hard limits for bulk level operations
 MAX_ACTORS_PER_WRITE = int(os.environ.get("CONAN_MCP_MAX_ACTORS", 200))
 MAX_TRACE_SAMPLES = 16384
+# Max difference (cm) between exported landscape heights and line traces before a write is refused
+TRACE_TOLERANCE_CM = float(os.environ.get("CONAN_MCP_TRACE_TOLERANCE_CM", 20))
 # Folder (inside the project's Saved/ dir) used for every file the server reads or writes
 SAVED_SUBDIR = "ConanMCP"
 

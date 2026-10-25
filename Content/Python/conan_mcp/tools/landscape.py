@@ -11,6 +11,7 @@ Backends, best first:
 import base64
 import json
 import os
+import time
 from array import array
 
 from ..core import ue
@@ -279,31 +280,36 @@ def tool_sculpt_terrain(args):
 
 
 def _sculpt_render_target(args, dry):
-    t0 = __import__("time").time()
+    t0 = time.time()
     lay = rt.layout(args.get("landscape"))
     tr = rt.transform(lay)
     op, cx, cy, radius, extra, params = _brush_params(args, tr)
-    before = rt.read_heights(lay)
-    timings = {"read_s": round(__import__("time").time() - t0, 3)}
-    full = before.copy()
-    region = _region_for(cx, cy, radius, extra, params, op)
-    sub = full.crop(*region)
-    if sub.width * sub.height > MAX_REGION_VERTS:
-        raise ValueError("Brush region too large (> 1M vertices); use a smaller radius or several strokes")
-    t1 = __import__("time").time()
-    stats = apply_brush(sub, op, cx, cy, radius, **params)
-    timings["brush_s"] = round(__import__("time").time() - t1, 3)
-    result = {"backend": "render_target", "operation": op, "landscape": lay["label"],
-              "grid": [lay["width"], lay["height"]], "region_quads": [sub.x0, sub.y0, sub.x0 + sub.width - 1, sub.y0 + sub.height - 1],
-              "stats": _stats_cm(stats, tr), "dry_run": dry, "timings": timings}
-    if dry or not stats["changed_vertices"]:
+
+    def then(before, attempts):
+        timings = {"read_s": round(time.time() - t0, 3), "read_attempts": attempts}
+        full = before.copy()
+        region = _region_for(cx, cy, radius, extra, params, op)
+        sub = full.crop(*region)
+        if sub.width * sub.height > MAX_REGION_VERTS:
+            raise ValueError("Brush region too large (> 1M vertices); use a smaller radius or several strokes")
+        t1 = time.time()
+        stats = apply_brush(sub, op, cx, cy, radius, **params)
+        timings["brush_s"] = round(time.time() - t1, 3)
+        result = {"backend": "render_target", "operation": op, "landscape": lay["label"], "members": lay["members"],
+                  "grid": [lay["width"], lay["height"]],
+                  "region_quads": [sub.x0, sub.y0, sub.x0 + sub.width - 1, sub.y0 + sub.height - 1],
+                  "stats": _stats_cm(stats, tr), "dry_run": dry, "timings": timings}
+        if dry or not stats["changed_vertices"]:
+            result["trace_check"] = rt.trace_check(lay, before, rt.trace_points(lay, (cx, cy)))["status"]
+            return result
+        full.paste(sub)
+        write = rt.safe_write(lay, full, before, verify=args.get("verify", True), center=(cx, cy))
+        timings.update(write.pop("timings"))
+        result.update(write)
+        result["undo"] = (f"Ctrl+Z / undo may revert it; guaranteed: restore_heightmap_backup(file_name='{write['backup']}').")
         return result
-    full.paste(sub)
-    write = rt.safe_write(lay, full, before, verify=args.get("verify", True))
-    timings.update(write.pop("timings"))
-    result.update(write)
-    result["undo"] = (f"Ctrl+Z / undo may revert it; guaranteed: restore_heightmap_backup(file_name='{write['backup']}').")
-    return result
+
+    return rt.ready_heights(lay, then, allow_zero_heights=bool(args.get("allow_zero_heights")))
 
 
 # ---------------------------------------------------------------------------
@@ -397,12 +403,15 @@ def tool_export_heightmap(args):
     ue.require()
     if not _native_ok() and rt.supported():
         lay = rt.layout(args.get("landscape"))
-        grid = rt.read_heights(lay)
         out = ue.safe_file(args.get("file_name") or "heightmap.png", HEIGHTMAP_DIR, ".png")
-        with open(out, "wb") as f:
-            f.write(encode_png16(grid))
-        return {"written": out, "width": grid.width, "height": grid.height, "landscape": lay["label"],
-                "backend": "render_target", "min_units": min(grid.data), "max_units": max(grid.data)}
+
+        def then(grid, attempts):
+            with open(out, "wb") as f:
+                f.write(encode_png16(grid))
+            return {"written": out, "width": grid.width, "height": grid.height, "landscape": lay["label"],
+                    "members": lay["members"], "backend": "render_target", "read_attempts": attempts,
+                    "min_units": min(grid.data), "max_units": max(grid.data)}
+        return rt.ready_heights(lay, then, allow_zero_heights=bool(args.get("allow_zero_heights")))
     _require_native("get_height_region_json")
     info = pick_landscape(args.get("landscape"))
     ext = info["extent_quads"]
@@ -422,12 +431,17 @@ def tool_import_heightmap(args):
             grid = decode_png16(f.read())
         if (grid.width, grid.height) != (lay["width"], lay["height"]):
             raise ValueError(f"Heightmap is {grid.width}x{grid.height}, landscape needs {lay['width']}x{lay['height']}")
-        before = rt.read_heights(lay)
-        stats = _stats_cm(diff_stats(before, grid), rt.transform(lay))
-        if args.get("dry_run"):
-            return {"dry_run": True, "stats": stats, "backend": "render_target"}
-        res = rt.safe_write(lay, grid, before, verify=args.get("verify", True))
-        return {"imported": os.path.basename(path), "stats": stats, "backend": "render_target", **res}
+        if grid.data.count(0) and not args.get("allow_zero_heights"):
+            raise ValueError(f"The file contains {grid.data.count(0)} heights of exactly 0 (-256 m at scale 100); "
+                             "refusing to import (pass allow_zero_heights=true if that is intended)")
+
+        def then(before, attempts):
+            stats = _stats_cm(diff_stats(before, grid), rt.transform(lay))
+            if args.get("dry_run"):
+                return {"dry_run": True, "stats": stats, "backend": "render_target", "read_attempts": attempts}
+            res = rt.safe_write(lay, grid, before, verify=args.get("verify", True))
+            return {"imported": os.path.basename(path), "stats": stats, "backend": "render_target", **res}
+        return rt.ready_heights(lay, then)
     _require_native("set_height_region_json")
     info = pick_landscape(args.get("landscape"))
     ext = info["extent_quads"]
@@ -461,24 +475,37 @@ def tool_test_landscape_backend(args):
     lay = rt.layout(args.get("landscape"))
     out["layout"] = rt.describe(lay)
     t0 = _t.time()
-    grid = rt.read_heights(lay)
-    out["read_s"] = round(_t.time() - t0, 3)
-    t0 = _t.time()
-    again = rt.read_heights(lay)
-    out["second_read_identical"] = rt.compare(grid, again)["altered_heights"] == 0
-    out["heights"] = {"min_units": min(grid.data), "max_units": max(grid.data), "unique_values": len(set(grid.data)),
-                      "min_z_cm": round(rt.transform(lay).height_to_z(min(grid.data)), 2),
-                      "max_z_cm": round(rt.transform(lay).height_to_z(max(grid.data)), 2)}
-    if len(set(grid.data)) <= 1:
-        out["warning"] = "All heights are equal: flat landscape or the export did not write the render target"
-    if args.get("write_test"):
+
+    def then(grid, attempts):
+        out["read_attempts"] = attempts
+        out["read_s"] = round(_t.time() - t0, 3)
         try:
-            res = rt.safe_write(lay, grid, grid, verify=True)
-            out["write_test"] = {"altered_heights": 0, "exact": True, **res}
-        except rt.RoundTripError as e:
-            out["write_test"] = {"exact": False, "error": str(e)}
-    out["result"] = "ok" if out.get("write_test", {}).get("exact", True) and out["second_read_identical"] else "problems found"
-    return out
+            again = rt.read_heights(lay)
+            out["second_read_identical"] = rt.compare(grid, again)["altered_heights"] == 0
+        except rt.NotReadyError as e:
+            out["second_read_identical"] = False
+            out["second_read_error"] = str(e)
+        tr = rt.transform(lay)
+        out["heights"] = {"min_units": min(grid.data), "max_units": max(grid.data), "unique_values": len(set(grid.data)),
+                          "min_z_cm": round(tr.height_to_z(min(grid.data)), 2),
+                          "max_z_cm": round(tr.height_to_z(max(grid.data)), 2)}
+        tc = rt.trace_check(lay, grid, rt.trace_points(lay))
+        out["trace_check"] = tc["status"]
+        out["trace_check_details"] = tc
+        if len(set(grid.data)) <= 1:
+            out["warning"] = "All heights are equal: flat landscape or the export did not write the render target"
+        if args.get("write_test") and tc["status"] != "mismatch":
+            try:
+                res = rt.safe_write(lay, grid, grid, verify=True)
+                out["write_test"] = {"altered_heights": 0, "exact": res["verified"] is True, **res}
+            except (rt.RoundTripError, rt.ReadMismatchError) as e:
+                out["write_test"] = {"exact": False, "error": str(e)}
+        ok = (out["second_read_identical"] and tc["status"] != "mismatch"
+              and out.get("write_test", {}).get("exact", True))
+        out["result"] = "ok" if ok else "problems found"
+        return out
+
+    return rt.ready_heights(lay, then, allow_zero_heights=bool(args.get("allow_zero_heights")))
 
 
 def tool_list_heightmap_backups(args):
@@ -492,12 +519,17 @@ def tool_restore_heightmap_backup(args):
         raise ue.UnsupportedError("Restoring needs the render_target backend; import the PNG from Landscape mode instead")
     lay = rt.layout(args.get("landscape"))
     grid = rt.load_backup(args["file_name"])
-    before = rt.read_heights(lay)
-    stats = _stats_cm(diff_stats(before, grid), rt.transform(lay))
-    if args.get("dry_run"):
-        return {"dry_run": True, "stats": stats}
-    res = rt.safe_write(lay, grid, before, verify=True)
-    return {"restored": args["file_name"], "stats": stats, **res}
+    if (grid.width, grid.height) != (lay["width"], lay["height"]):
+        raise ValueError(f"Backup is {grid.width}x{grid.height} but landscape '{lay['label']}' is "
+                         f"{lay['width']}x{lay['height']}: wrong landscape?")
+
+    def then(before, attempts):
+        stats = _stats_cm(diff_stats(before, grid), rt.transform(lay))
+        if args.get("dry_run"):
+            return {"dry_run": True, "stats": stats}
+        res = rt.safe_write(lay, grid, before, verify=True)
+        return {"restored": args["file_name"], "stats": stats, **res}
+    return rt.ready_heights(lay, then, allow_zero_heights=True)
 
 
 def register(registry):
