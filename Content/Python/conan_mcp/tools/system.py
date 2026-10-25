@@ -24,6 +24,11 @@ PROBES = {
     "dirty_packages": "EditorLoadingAndSavingUtils.get_dirty_content_packages",
     "landscape": "Landscape",
     "native_library": ue.NATIVE_LIBRARY_NAME,
+    "landscape_rt_export": "LandscapeProxy.landscape_export_heightmap_to_render_target",
+    "landscape_rt_import": "LandscapeProxy.landscape_import_heightmap_from_render_target",
+    "landscape_rt_weightmap": "LandscapeProxy.landscape_import_weightmap_from_render_target",
+    "rt_read": "RenderingLibrary.read_render_target_raw",
+    "rt_canvas_draw": "RenderingLibrary.begin_draw_canvas_to_render_target",
     "control_rig_sequencer": "ControlRigSequencerLibrary",
     "fk_control_rig": "FKControlRig",
     "level_sequence": "LevelSequence",
@@ -36,6 +41,15 @@ PROBES = {
 }
 
 
+def _terrain_backend(lib):
+    if lib is not None and hasattr(lib, "get_height_region_json"):
+        return "native"
+    from . import landscape_rt
+    if ue.unreal is not None and landscape_rt.supported():
+        return "render_target"
+    return "heightmap_file"
+
+
 def tool_get_server_capabilities(args):
     caps = {k: ue.has(v) for k, v in PROBES.items()}
     lib = ue.native()
@@ -46,8 +60,7 @@ def tool_get_server_capabilities(args):
         "engine_version": ue.unreal.SystemLibrary.get_engine_version() if ue.has("SystemLibrary.get_engine_version") else None,
         "capabilities": caps,
         "native_library_functions": native_fns,
-        "terrain_editing": ("native (in-editor sculpting & painting)" if lib else
-                            "heightmap file workflow (export from Landscape mode, edit, re-import)"),
+        "terrain_editing": _terrain_backend(lib),
         "security": {
             "write_tools": config.ENABLE_WRITE_TOOLS,
             "destructive_tools": config.ENABLE_DESTRUCTIVE_TOOLS,

@@ -271,7 +271,7 @@ def test_sculpt_without_backend_explains(engine):
 
 
 def test_paint_requires_native(engine):
-    assert "ConanMCPNative" in call_err("paint_landscape_layer", layer="Grass", center={"x": 0, "y": 0})
+    assert "not available" in call_err("paint_landscape_layer", layer="Grass", center={"x": 0, "y": 0})
 
 
 # --- datatables ----------------------------------------------------------------
@@ -367,7 +367,7 @@ def test_delete_asset_is_destructive(engine, monkeypatch):
 def test_capabilities(engine):
     caps = call("get_server_capabilities")
     assert caps["engine_available"] and caps["capabilities"]["editor_actor_subsystem"]
-    assert caps["terrain_editing"].startswith("heightmap file")
+    assert caps["terrain_editing"] == "heightmap_file"  # the basic fake has no render-target APIs
 
 
 def test_nested_path_arguments_are_validated(engine):

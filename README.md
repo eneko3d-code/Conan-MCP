@@ -14,7 +14,7 @@
 
 **The ultimate bridge connecting modern AI Agents (Google Antigravity, Cursor, Claude Code) directly to the Conan Exiles Enhanced DevKit editor.**
 
-[Installation](#-step-by-step-installation) • [Tools (128)](#-what-it-can-do-128-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
+[Installation](#-step-by-step-installation) • [Tools (131)](#-what-it-can-do-131-tools) • [Skills](#-skills) • [Native module](#-optional-native-module) • [Client Setup](#-mcp-client-configuration) • [EULA & Legal](#-funcom-modding-eula-compliance)
 
 </div>
 
@@ -37,8 +37,8 @@ It lets AI agents (Claude Code, Cursor, Google Antigravity...) **see and edit** 
 
 1. **Map design with judgement**: terrain analysis (heights, slopes, walkable %, flat build sites), actor density maps,
    top-down captures returned as images, and a `conan-map-design` skill with real level-design rules.
-2. **Terrain editing**: raise / lower / flatten / smooth / noise / ramp brushes and layer painting, either live (optional native
-   module) or through a 16-bit heightmap PNG.
+2. **Terrain editing**: raise / lower / flatten / smooth / noise / ramp brushes, edited live in the DevKit through render
+   targets (pure Python, automatic backups and exact verification), plus heightmap export/import.
 3. **Structures and props**: classify everything in the level, query by area, place (single, batch, scatter, along paths),
    snap to ground, duplicate, remove, and validate (floating, buried, overlapping, too steep).
 4. **Items, recipes and DataTables**: real row data, schema, search, add/update/duplicate/remove rows, JSON/CSV export and import,
@@ -123,10 +123,10 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "2.2.0",
+  "version": "2.2.1",
   "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
-  "registered_tools": 128,
+  "registered_tools": 131,
   "registered_resources": 4,
   "registered_prompts": 14,
   "sse_endpoint": "/sse",
@@ -177,7 +177,7 @@ Add to your agent or workspace MCP configuration:
 
 ---
 
-## 🛠️ What it can do (128 tools)
+## 🛠️ What it can do (131 tools)
 
 Full reference with every argument: **[docs/tools.md](docs/tools.md)** (generated from the code).
 
@@ -227,8 +227,8 @@ checks your balance and shows you a plan, and it only spends after you confirm. 
 
 ## ⚙️ Optional native module
 
-Everything works without compiling. Enabling the optional C++ module `ConanMCPNative` adds live in-editor sculpting,
-layer painting and exact Blueprint compiler messages. See [docs/native_module.md](docs/native_module.md).
+Everything works without compiling, including live terrain sculpting. The C++ module `ConanMCPNative` is only for full
+source builds of Unreal: the Conan DevKit has no engine headers and cannot compile it. See [docs/native_module.md](docs/native_module.md).
 
 ---
 
@@ -255,7 +255,7 @@ graph TD
     subgraph "Conan Exiles DevKit editor"
         T["HTTP /mcp + SSE /sse (loopback, Origin/Host checks, optional token)"]
         P["JSON-RPC engine: schema + path validation, security levels"]
-        R["Registry: 128 tools · 14 prompts (skills) · 5 resources"]
+        R["Registry: 131 tools · 14 prompts (skills) · 5 resources"]
         D["Game Thread dispatcher (timeouts, deferred multi-frame work)"]
         TL["Tool modules: mapping · landscape · capture · level · datatables · blueprints · animation · tripo · mod · builtin"]
         N["Optional C++ ConanMCPNative (landscape edit, BP compiler)"]
@@ -270,7 +270,7 @@ graph TD
 
 ## 🧪 Testing & Verification
 
-- `python -m pytest tests` runs 102 tests on any machine, no Unreal needed. They cover:
+- `python -m pytest tests` runs 112 tests on any machine, no Unreal needed. They cover:
   - the JSON-RPC engine and the security policy;
   - the HTTP and SSE transports;
   - the terrain and brush math, the 16-bit PNG codec, scatter and placement rules;

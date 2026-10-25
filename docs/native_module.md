@@ -1,13 +1,19 @@
 # Optional native module (`ConanMCPNative`)
 
-Everything in ConanMCP works **without compiling anything**: the server is pure Python. The optional C++
-module `Source/ConanMCPNative` adds features that Unreal's Python API cannot provide:
+> **The Conan Exiles DevKit cannot build this module.** It ships without the engine headers
+> (`Engine/Source/Runtime/Landscape/...` is missing), so `ConanMCP.uplugin` deliberately has no `Modules`
+> section and no binaries are shipped. Landscape editing in the DevKit uses the pure-Python **render_target**
+> backend instead: live sculpting, export/import, backups and verification. This module only matters if you
+> use ConanMCP in a full Unreal Engine build from source.
+
+Everything in ConanMCP works **without compiling anything**: the server is pure Python. In a source build of the
+engine, the optional C++ module `Source/ConanMCPNative` adds:
 
 | Feature | Without the module | With the module |
 |---|---|---|
-| `sculpt_terrain` | Edits a 16-bit heightmap PNG that you re-import from Landscape mode | Edits the landscape live, undoable with Ctrl+Z |
-| `paint_landscape_layer` | Not available | Paints and erases material layers |
-| `export_heightmap` / `import_heightmap` | Use Landscape mode → Manage → Export/Import | One tool call each |
+| `sculpt_terrain` | Live, through render targets (backup + verification) | Live, region-only, undoable with Ctrl+Z |
+| `paint_landscape_layer` | Replaces a whole layer only (`replace_layer=true`) | Blends into existing weights |
+| `export_heightmap` / `import_heightmap` | Through render targets | Direct |
 | `compile_blueprint` | Status + matching Output Log lines | Exact compiler errors and warnings |
 | `get_blueprint_info` | Best-effort variable types | Exact pin types, flags, node titles per graph |
 | `add_blueprint_variable` | Needs `BlueprintEditorLibrary.add_member_variable` | Always available |

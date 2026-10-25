@@ -1,5 +1,32 @@
 # Changelog
 
+## 2.2.1 — Landscape editing without C++ (render_target backend)
+### Fixed
+- Landscape tools were unusable in the DevKit. `ConanMCPNative` can never load there: the `.uplugin` has no
+  `Modules`, there are no binaries, and the engine headers are missing. `sculpt_terrain` (without `heightmap_file`),
+  `export_heightmap`, `import_heightmap` and `paint_landscape_layer` now work through a pure-Python **render_target**
+  backend:
+  - heights travel through `LandscapeProxy.landscape_export/import_heightmap_*_render_target`;
+  - they use RGBA8 render targets in RG encoding, which is exact for 16 bits;
+  - writes draw a linear (non-sRGB), nearest-filtered transient texture.
+- Readback scale (0–1 or 0–255) is detected per buffer, not per pixel.
+
+### Safety
+- A full heightmap PNG backup is taken before every write (last 20 kept).
+- Every write is verified by re-exporting; on any difference the backup is restored automatically, and the
+  manual recovery path is reported if even that fails.
+
+### New tools
+- `test_landscape_backend`: export/decode check, timings, unchanged write round-trip.
+- `list_heightmap_backups` and `restore_heightmap_backup`.
+
+### Other
+- `paint_landscape_layer` without the native module replaces the whole layer and therefore requires `replace_layer=true`.
+- `get_landscape_info` and `get_server_capabilities` report `render_target` and its API probes. Works on
+  `Landscape` and `LandscapeStreamingProxy` (the grid spans every loaded proxy).
+- `docs/native_module.md` states that the DevKit cannot build the module. The `conan-landscape-sculpting` skill
+  covers the new workflow. 10 new tests (112 in total).
+
 ## 2.2.0 — Tripo AI integration
 - 15 new tools (128 in total):
   - account and tasks: `tripo_get_balance`, `tripo_get_task`, `tripo_list_tasks`, `tripo_upload_file`;

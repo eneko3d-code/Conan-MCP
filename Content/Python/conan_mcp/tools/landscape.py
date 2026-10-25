@@ -1,10 +1,11 @@
 """Landscape editing: info, sculpting brushes, layer painting and heightmap export/import.
 
-Two backends:
-  * native  - the optional C++ library (Source/ConanMCPNative) reads/writes height
-              regions in the editor, inside an undoable transaction.
-  * file    - pure Python: edit a 16-bit PNG heightmap exported from Landscape mode
-              (Saved/ConanMCP/heightmaps) and re-import it from Landscape mode.
+Backends, best first:
+  * native        - optional C++ library (Source/ConanMCPNative); cannot be built in the Conan DevKit
+                    (no engine headers) but is used automatically if present.
+  * render_target - pure Python through LandscapeProxy export/import to render targets (default in the
+                    DevKit). Every write is backed up and verified; see tools/landscape_rt.py.
+  * file          - edit a 16-bit PNG heightmap exported from Landscape mode and re-import it by hand.
 """
 
 import base64
@@ -15,7 +16,8 @@ from array import array
 from ..core import ue
 from ..core.security import READ_ONLY, SAFE_WRITE
 from ..mapping.heightmap import (HeightGrid, LandscapeTransform, apply_brush, brush_region, decode_png16,
-                                 diff_stats, encode_png16)
+                                 diff_stats, encode_png16, falloff_weight)
+from . import landscape_rt as rt
 
 MAX_REGION_VERTS = 1024 * 1024
 HEIGHTMAP_DIR = "heightmaps"
@@ -91,13 +93,51 @@ def transform_of(info) -> LandscapeTransform:
     return LandscapeTransform((o["x"], o["y"], o["z"]), (s["x"], s["y"], s["z"]))
 
 
+def _native_ok(fn="get_height_region_json"):
+    lib = ue.native()
+    return lib is not None and hasattr(lib, fn)
+
+
+def backends_available():
+    out = []
+    if _native_ok():
+        out.append("native")
+    if rt.supported():
+        out.append("render_target")
+    out.append("heightmap_file")
+    return out
+
+
+def editing_backend():
+    return backends_available()[0]
+
+
+def choose_backend(mode):
+    avail = backends_available()
+    if mode in (None, "", "auto"):
+        return avail[0]
+    wanted = {"file": "heightmap_file"}.get(mode, mode)
+    if wanted not in avail:
+        if wanted == "native":
+            raise ue.UnsupportedError("The native module is not loaded (the Conan DevKit cannot compile it); use mode 'auto' "
+                                      "or 'render_target'")
+        raise ue.UnsupportedError(f"Backend '{wanted}' is not available here (missing APIs: {rt.missing_apis()})")
+    return wanted
+
+
 def tool_get_landscape_info(args):
     ue.require()
     items = landscapes()
-    return {"landscapes": items, "count": len(items),
-            "editing_backend": "native" if ue.native() else "heightmap_file",
+    result = {"landscapes": items, "count": len(items),
+              "editing_backend": editing_backend(), "backends_available": backends_available(),
             "heightmap_folder": ue.saved_dir(HEIGHTMAP_DIR),
             "coordinates": "Brush coordinates are world cm. Height units: 1 unit = scale.z/128 cm; 32768 = landscape origin Z."}
+    if rt.supported() and items:
+        try:
+            result["render_target_layout"] = rt.describe(rt.layout(args.get("landscape")))
+        except Exception as e:
+            result["render_target_layout_error"] = str(e)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -187,16 +227,20 @@ def _stats_cm(stats, tr):
 
 def tool_sculpt_terrain(args):
     ue.require()
+    mode = args.get("mode", "auto")
+    if args.get("heightmap_file") and mode in (None, "", "auto"):
+        mode = "file"  # an explicit heightmap file always means the file workflow
+    backend = choose_backend(mode)
+    dry = bool(args.get("dry_run"))
+
+    if backend == "render_target":
+        return _sculpt_render_target(args, dry)
+
     info = pick_landscape(args.get("landscape"))
     tr = transform_of(info)
     op, cx, cy, radius, extra, params = _brush_params(args, tr)
-    mode = args.get("mode", "auto")
-    use_native = (mode in ("auto", "native")) and ue.native() is not None and hasattr(ue.native(), "get_height_region_json")
-    if mode == "native" and not use_native:
-        raise ue.UnsupportedError("Native sculpting needs the ConanMCPNative C++ module (see docs/native_module.md)")
-    dry = bool(args.get("dry_run"))
 
-    if use_native and mode != "file":
+    if backend == "native":
         region = _clamp_region(_region_for(cx, cy, radius, extra, params, op), info)
         grid = _native_get_region(info["label"], *region)
         stats = apply_brush(grid, op, cx, cy, radius, **params)
@@ -210,7 +254,7 @@ def tool_sculpt_terrain(args):
     src_name = args.get("heightmap_file")
     if not src_name:
         raise ue.UnsupportedError(
-            "No native sculpting available. Export the heightmap from Landscape mode (Manage > Export > Heightmap, "
+            "No in-editor sculpting available. Export the heightmap from Landscape mode (Manage > Export > Heightmap, "
             f"16-bit PNG) into '{ue.saved_dir(HEIGHTMAP_DIR)}' and pass heightmap_file='<name>.png'.")
     src = ue.safe_file(src_name, HEIGHTMAP_DIR, ".png")
     with open(src, "rb") as f:
@@ -234,8 +278,36 @@ def tool_sculpt_terrain(args):
     return result
 
 
+def _sculpt_render_target(args, dry):
+    t0 = __import__("time").time()
+    lay = rt.layout(args.get("landscape"))
+    tr = rt.transform(lay)
+    op, cx, cy, radius, extra, params = _brush_params(args, tr)
+    before = rt.read_heights(lay)
+    timings = {"read_s": round(__import__("time").time() - t0, 3)}
+    full = before.copy()
+    region = _region_for(cx, cy, radius, extra, params, op)
+    sub = full.crop(*region)
+    if sub.width * sub.height > MAX_REGION_VERTS:
+        raise ValueError("Brush region too large (> 1M vertices); use a smaller radius or several strokes")
+    t1 = __import__("time").time()
+    stats = apply_brush(sub, op, cx, cy, radius, **params)
+    timings["brush_s"] = round(__import__("time").time() - t1, 3)
+    result = {"backend": "render_target", "operation": op, "landscape": lay["label"],
+              "grid": [lay["width"], lay["height"]], "region_quads": [sub.x0, sub.y0, sub.x0 + sub.width - 1, sub.y0 + sub.height - 1],
+              "stats": _stats_cm(stats, tr), "dry_run": dry, "timings": timings}
+    if dry or not stats["changed_vertices"]:
+        return result
+    full.paste(sub)
+    write = rt.safe_write(lay, full, before, verify=args.get("verify", True))
+    timings.update(write.pop("timings"))
+    result.update(write)
+    result["undo"] = (f"Ctrl+Z / undo may revert it; guaranteed: restore_heightmap_backup(file_name='{write['backup']}').")
+    return result
+
+
 # ---------------------------------------------------------------------------
-# Painting, export, import (native)
+# Painting, export, import
 # ---------------------------------------------------------------------------
 
 def _require_native(fn):
@@ -245,9 +317,46 @@ def _require_native(fn):
     return lib
 
 
+def _paint_render_target(args):
+    if not rt.paint_supported():
+        raise ue.UnsupportedError(f"Layer painting is not available (missing APIs: {rt.missing_apis()})")
+    layer = args.get("layer", "")
+    if not layer:
+        raise ValueError("'layer' is required (see get_landscape_info layers)")
+    if not args.get("replace_layer"):
+        raise ue.UnsupportedError(
+            "Without the native module the current weights of a layer cannot be read, so painting REPLACES the whole "
+            f"layer '{layer}' on the entire landscape with this brush (everything outside it becomes 0 for that layer). "
+            "Pass replace_layer=true only for a new/empty layer or to repaint the layer from scratch.")
+    lay = rt.layout(args.get("landscape"))
+    tr = rt.transform(lay)
+    c = args.get("center") or {}
+    cx, cy = tr.world_to_grid(float(c.get("x", 0)), float(c.get("y", 0)))
+    radius = float(args.get("radius", 1000.0)) / tr.sx
+    strength = max(0.0, min(1.0, float(args.get("strength", 1.0))))
+    erase = args.get("mode", "paint") == "erase"
+    falloff = float(args.get("falloff", 0.5))
+    weights, painted = [0] * (lay["width"] * lay["height"]), 0
+    if not erase:
+        x0, y0, x1, y1 = brush_region(cx, cy, radius)
+        for y in range(max(0, y0), min(lay["height"] - 1, y1) + 1):
+            for x in range(max(0, x0), min(lay["width"] - 1, x1) + 1):
+                w = falloff_weight(((x - cx) ** 2 + (y - cy) ** 2) ** 0.5, radius, falloff)
+                if w > 0:
+                    weights[y * lay["width"] + x] = int(round(255 * w * strength))
+                    painted += 1
+    if args.get("dry_run"):
+        return {"dry_run": True, "backend": "render_target", "layer": layer, "painted_vertices": painted,
+                "warning": "Replaces the whole layer"}
+    rt.write_weights(lay, layer, weights)
+    return {"backend": "render_target", "layer": layer, "painted_vertices": painted, "replaced_layer": True}
+
+
 def tool_paint_landscape_layer(args):
     ue.require()
-    lib = _require_native("get_weight_region_json")
+    if not _native_ok("get_weight_region_json"):
+        return _paint_render_target(args)
+    lib = ue.native()
     info = pick_landscape(args.get("landscape"))
     tr = transform_of(info)
     layer = args.get("layer", "")
@@ -264,7 +373,6 @@ def tool_paint_landscape_layer(args):
     width = raw["width"]
     strength = max(0.0, min(1.0, float(args.get("strength", 1.0))))
     erase = args.get("mode", "paint") == "erase"
-    from ..mapping.heightmap import falloff_weight
     changed = 0
     for i in range(len(weights)):
         x, y = region[0] + i % width, region[1] + i // width
@@ -287,6 +395,14 @@ def tool_paint_landscape_layer(args):
 
 def tool_export_heightmap(args):
     ue.require()
+    if not _native_ok() and rt.supported():
+        lay = rt.layout(args.get("landscape"))
+        grid = rt.read_heights(lay)
+        out = ue.safe_file(args.get("file_name") or "heightmap.png", HEIGHTMAP_DIR, ".png")
+        with open(out, "wb") as f:
+            f.write(encode_png16(grid))
+        return {"written": out, "width": grid.width, "height": grid.height, "landscape": lay["label"],
+                "backend": "render_target", "min_units": min(grid.data), "max_units": max(grid.data)}
     _require_native("get_height_region_json")
     info = pick_landscape(args.get("landscape"))
     ext = info["extent_quads"]
@@ -299,6 +415,19 @@ def tool_export_heightmap(args):
 
 def tool_import_heightmap(args):
     ue.require()
+    if not _native_ok("set_height_region_json") and rt.supported():
+        lay = rt.layout(args.get("landscape"))
+        path = ue.safe_file(args.get("file_name", ""), HEIGHTMAP_DIR, ".png")
+        with open(path, "rb") as f:
+            grid = decode_png16(f.read())
+        if (grid.width, grid.height) != (lay["width"], lay["height"]):
+            raise ValueError(f"Heightmap is {grid.width}x{grid.height}, landscape needs {lay['width']}x{lay['height']}")
+        before = rt.read_heights(lay)
+        stats = _stats_cm(diff_stats(before, grid), rt.transform(lay))
+        if args.get("dry_run"):
+            return {"dry_run": True, "stats": stats, "backend": "render_target"}
+        res = rt.safe_write(lay, grid, before, verify=args.get("verify", True))
+        return {"imported": os.path.basename(path), "stats": stats, "backend": "render_target", **res}
     _require_native("set_height_region_json")
     info = pick_landscape(args.get("landscape"))
     ext = info["extent_quads"]
@@ -320,14 +449,65 @@ def tool_import_heightmap(args):
     return {"imported": os.path.basename(path), "stats": stats}
 
 
+def tool_test_landscape_backend(args):
+    """Checks the render-target backend: export/decode and, optionally, an unchanged write round-trip."""
+    import time as _t
+    ue.require()
+    out = {"backends_available": backends_available(), "editing_backend": editing_backend(),
+           "missing_apis": rt.missing_apis()}
+    if not rt.supported():
+        out["result"] = "render_target backend not available"
+        return out
+    lay = rt.layout(args.get("landscape"))
+    out["layout"] = rt.describe(lay)
+    t0 = _t.time()
+    grid = rt.read_heights(lay)
+    out["read_s"] = round(_t.time() - t0, 3)
+    t0 = _t.time()
+    again = rt.read_heights(lay)
+    out["second_read_identical"] = rt.compare(grid, again)["altered_heights"] == 0
+    out["heights"] = {"min_units": min(grid.data), "max_units": max(grid.data), "unique_values": len(set(grid.data)),
+                      "min_z_cm": round(rt.transform(lay).height_to_z(min(grid.data)), 2),
+                      "max_z_cm": round(rt.transform(lay).height_to_z(max(grid.data)), 2)}
+    if len(set(grid.data)) <= 1:
+        out["warning"] = "All heights are equal: flat landscape or the export did not write the render target"
+    if args.get("write_test"):
+        try:
+            res = rt.safe_write(lay, grid, grid, verify=True)
+            out["write_test"] = {"altered_heights": 0, "exact": True, **res}
+        except rt.RoundTripError as e:
+            out["write_test"] = {"exact": False, "error": str(e)}
+    out["result"] = "ok" if out.get("write_test", {}).get("exact", True) and out["second_read_identical"] else "problems found"
+    return out
+
+
+def tool_list_heightmap_backups(args):
+    ue.require()
+    return {"backups": rt.list_backups(args.get("landscape")), "folder": ue.saved_dir(rt.BACKUP_DIR)}
+
+
+def tool_restore_heightmap_backup(args):
+    ue.require()
+    if not rt.supported():
+        raise ue.UnsupportedError("Restoring needs the render_target backend; import the PNG from Landscape mode instead")
+    lay = rt.layout(args.get("landscape"))
+    grid = rt.load_backup(args["file_name"])
+    before = rt.read_heights(lay)
+    stats = _stats_cm(diff_stats(before, grid), rt.transform(lay))
+    if args.get("dry_run"):
+        return {"dry_run": True, "stats": stats}
+    res = rt.safe_write(lay, grid, before, verify=True)
+    return {"restored": args["file_name"], "stats": stats, **res}
+
+
 def register(registry):
     vec2 = {"type": "object", "properties": {"x": {"type": "number"}, "y": {"type": "number"}, "z": {"type": "number"}}}
     registry.register("get_landscape_info", "Landscape",
                       "Landscape actors with origin, scale, quad extent, components, material/layers and the editing backend available.",
-                      {"properties": {}}, READ_ONLY, tool_get_landscape_info)
+                      {"properties": {"landscape": {"type": "string"}}}, READ_ONLY, tool_get_landscape_info)
     registry.register("sculpt_terrain", "Landscape",
                       "Sculpts the landscape with a brush: raise, lower, flatten, smooth, noise or ramp (world cm). "
-                      "Native backend edits in-editor (undoable); otherwise edits a 16-bit heightmap PNG. Always dry_run first.",
+                      "Edits the landscape in-editor (render_target backend: backed up and verified) or a 16-bit heightmap PNG. Always dry_run first.",
                       {"properties": {
                           "operation": {"type": "string", "enum": ["raise", "lower", "flatten", "smooth", "noise", "ramp"]},
                           "center": vec2, "radius": {"type": "number", "description": "Brush radius in cm (ramp: half width)"},
@@ -339,24 +519,38 @@ def register(registry):
                           "iterations": {"type": "integer", "minimum": 1, "maximum": 20},
                           "noise_scale": {"type": "number", "description": "Noise wavelength in cm"},
                           "seed": {"type": "integer"}, "landscape": {"type": "string"},
-                          "mode": {"type": "string", "enum": ["auto", "native", "file"]},
+                          "mode": {"type": "string", "enum": ["auto", "native", "render_target", "file"]},
+                          "verify": {"type": "boolean", "description": "Re-export and compare after writing (render_target)"},
                           "heightmap_file": {"type": "string"}, "output_file": {"type": "string"},
                           "dry_run": {"type": "boolean"}},
                        "required": ["operation", "center"]},
                       SAFE_WRITE, tool_sculpt_terrain, idempotent=False)
     registry.register("paint_landscape_layer", "Landscape",
-                      "Paints or erases a landscape material layer (grass, sand, rock...) with a soft brush. Native module required.",
+                      "Paints or erases a landscape material layer (grass, sand, rock...) with a soft brush. Without the native module it "
+                      "REPLACES the whole layer and needs replace_layer=true.",
                       {"properties": {"layer": {"type": "string"}, "center": vec2, "radius": {"type": "number"},
                                       "strength": {"type": "number", "minimum": 0, "maximum": 1},
                                       "falloff": {"type": "number", "minimum": 0, "maximum": 1},
                                       "mode": {"type": "string", "enum": ["paint", "erase"]},
+                                      "replace_layer": {"type": "boolean", "description": "render_target backend: required, replaces the whole layer"},
                                       "landscape": {"type": "string"}, "dry_run": {"type": "boolean"}},
                        "required": ["layer", "center"]},
                       SAFE_WRITE, tool_paint_landscape_layer, idempotent=False)
-    registry.register("export_heightmap", "Landscape", "Exports the whole landscape heightmap as a 16-bit PNG into Saved/ConanMCP/heightmaps (native module).",
+    registry.register("export_heightmap", "Landscape", "Exports the whole landscape heightmap as a 16-bit PNG into Saved/ConanMCP/heightmaps.",
                       {"properties": {"file_name": {"type": "string"}, "landscape": {"type": "string"}}},
                       READ_ONLY, tool_export_heightmap)
-    registry.register("import_heightmap", "Landscape", "Applies a 16-bit PNG from Saved/ConanMCP/heightmaps to the landscape (native module, undoable).",
-                      {"properties": {"file_name": {"type": "string"}, "landscape": {"type": "string"}, "dry_run": {"type": "boolean"}},
+    registry.register("import_heightmap", "Landscape", "Applies a 16-bit PNG from Saved/ConanMCP/heightmaps to the landscape (backed up and verified).",
+                      {"properties": {"file_name": {"type": "string"}, "landscape": {"type": "string"}, "dry_run": {"type": "boolean"},
+                                      "verify": {"type": "boolean"}},
                        "required": ["file_name"]},
                       SAFE_WRITE, tool_import_heightmap, idempotent=False)
+    registry.register("test_landscape_backend", "Landscape",
+                      "Diagnoses terrain editing: available backends, render-target export/decode, timings and (write_test) an "
+                      "unchanged write round-trip that must alter 0 heights. Run this first on a test level.",
+                      {"properties": {"landscape": {"type": "string"}, "write_test": {"type": "boolean"}}},
+                      SAFE_WRITE, tool_test_landscape_backend)
+    registry.register("list_heightmap_backups", "Landscape", "Automatic heightmap backups taken before every render-target write.",
+                      {"properties": {"landscape": {"type": "string"}}}, READ_ONLY, tool_list_heightmap_backups)
+    registry.register("restore_heightmap_backup", "Landscape", "Restores the landscape heights from a backup (guaranteed undo for sculpting).",
+                      {"properties": {"file_name": {"type": "string"}, "landscape": {"type": "string"}, "dry_run": {"type": "boolean"}},
+                       "required": ["file_name"]}, SAFE_WRITE, tool_restore_heightmap_backup, idempotent=False)
