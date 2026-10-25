@@ -88,7 +88,7 @@ def test_srgb_must_be_disabled(rt_engine, monkeypatch):
     err = call_err("sculpt_terrain", operation="raise", center={"x": 3200, "y": 3200}, radius=800, amount=100)
     assert "not exact" in err
     # the restore goes through the same broken path: the user is told how to recover by hand
-    assert "ALSO failed" in err and "Landscape mode" in err and ".png" in err
+    assert "could not be confirmed" in err and "Landscape mode" in err and ".png" in err
     assert len(before) == len(land.heights.data)
 
 
@@ -147,3 +147,96 @@ def test_paint_requires_replace_layer(rt_engine):
 def test_explicit_native_mode_explains(rt_engine):
     fu.make_rt_landscape()
     assert "cannot compile" in call_err("sculpt_terrain", operation="raise", center={"x": 0, "y": 0}, mode="native")
+
+
+# --- 2.2.2: grouping, first-read blanks, independent trace checks -------------------
+
+def test_two_landscapes_are_never_merged(rt_engine):
+    """AlmostEmpty: two 249x249 landscapes side by side must each be their own grid."""
+    a = fu.make_rt_landscape(size=249, label="Landscape")
+    b = fu.make_rt_landscape(size=249, label="Landscape2", min_corner=(24800.0, 0.0), base=30000)
+    info = call("get_landscape_info", landscape="Landscape2")
+    lay = info["render_target_layout"]
+    assert (lay["width"], lay["height"]) == (249, 249) and lay["members"] == ["Landscape2"]
+    exp = call("export_heightmap", landscape="Landscape2", file_name="l2.png")
+    assert exp["min_units"] >= 30000 and exp["min_units"] > 0  # no zero columns from the other landscape
+    b_before = list(b.heights.data)
+    call("sculpt_terrain", landscape="Landscape", operation="raise", center={"x": 12400, "y": 12400}, radius=500, amount=100)
+    assert list(b.heights.data) == b_before and a.imports == 1 and b.imports == 0
+
+
+def test_proxy_groups_with_its_owner(rt_engine):
+    main = fu.make_rt_landscape(size=65, label="Landscape")
+    proxy = fu.make_rt_landscape(cls=fu.LandscapeStreamingProxy, size=65, label="Proxy_1")
+    proxy.owner = main
+    lay = call("get_landscape_info", landscape="Proxy_1")["render_target_layout"]
+    assert sorted(lay["members"]) == ["Landscape", "Proxy_1"] and lay["label"] == "Landscape"
+
+
+def test_first_reads_blank_are_retried_before_writing(rt_engine):
+    land = fu.make_rt_landscape()
+    land.blank_exports = 2  # first export(s) of the session render nothing
+    before = land.heights.copy()
+    out = call("sculpt_terrain", operation="raise", center={"x": 3200, "y": 3200}, radius=500, amount=100, falloff=0)
+    assert out["timings"]["read_attempts"] == 3 and out["verified"] is True
+    assert land.heights.get(0, 0) == before.get(0, 0)  # nothing flattened to -128 m
+    assert min(land.heights.data) > 0
+
+
+def test_never_valid_read_writes_nothing(rt_engine, monkeypatch):
+    from conan_mcp.tools import landscape_rt
+    real = landscape_rt.ready_heights
+    monkeypatch.setattr(landscape_rt, "ready_heights",
+                        lambda lay, then, **k: real(lay, then, max_wait_s=0.3, min_interval_s=0.05, **{x: y for x, y in k.items() if x == "allow_zero_heights"}))
+    land = fu.make_rt_landscape()
+    land.blank_exports = 10 ** 6
+    err = call_err("sculpt_terrain", operation="raise", center={"x": 3200, "y": 3200}, radius=500, amount=100)
+    assert "Nothing was written" in err and land.imports == 0
+
+
+def test_zero_columns_in_read_are_rejected(rt_engine, monkeypatch):
+    from conan_mcp.tools import landscape_rt
+    real = landscape_rt.ready_heights
+    monkeypatch.setattr(landscape_rt, "ready_heights",
+                        lambda lay, then, **k: real(lay, then, max_wait_s=0.3, min_interval_s=0.05))
+    land = fu.make_rt_landscape()
+
+    def zero_columns(g):
+        for y in range(g.height):
+            for x in range(40, g.width):
+                g.data[y * g.width + x] = 0
+        return g
+    land.corrupt_export = zero_columns
+    err = call_err("sculpt_terrain", operation="raise", center={"x": 1000, "y": 1000}, radius=300, amount=100)
+    assert "exactly 0" in err and land.imports == 0
+
+
+def test_traces_veto_a_wrong_read(rt_engine):
+    """A plausible but wrong read (all heights shifted) must be caught by line traces before writing."""
+    land = fu.make_rt_landscape()
+
+    def shifted(g):
+        g.data = type(g.data)("H", [min(65535, v + 1000) for v in g.data])  # +7.8 m everywhere
+        return g
+    land.corrupt_export = shifted
+    err = call_err("sculpt_terrain", operation="raise", center={"x": 3200, "y": 3200}, radius=500, amount=100)
+    assert "do not match the real terrain" in err and "Nothing was written" in err and land.imports == 0
+
+
+def test_test_tool_reports_attempts_and_traces(rt_engine):
+    land = fu.make_rt_landscape()
+    land.blank_exports = 1
+    out = call("test_landscape_backend", write_test=True)
+    assert out["result"] == "ok" and out["read_attempts"] == 2 and out["trace_check"] == "ok"
+    assert out["layout"]["members"] == ["Landscape"]
+
+
+def test_post_write_trace_mismatch_restores(rt_engine, monkeypatch):
+    land = fu.make_rt_landscape()
+    before = list(land.heights.data)
+    real_z = land.z_at
+    # collision says something different from what was written, but only after the stroke is imported
+    monkeypatch.setattr(land, "z_at", lambda x, y: (real_z(x, y) + 500.0) if land.imports == 1 and real_z(x, y) is not None else real_z(x, y))
+    err = call_err("sculpt_terrain", operation="raise", center={"x": 3200, "y": 3200}, radius=500, amount=100)
+    assert "line traces disagree" in err and "restored exactly" in err
+    assert list(land.heights.data) == before

@@ -110,6 +110,7 @@ http://127.0.0.1:8123/mcp
 | `CONAN_MCP_TIMEOUT` | `30` | Seconds a tool may wait for the Game Thread. |
 | `CONAN_MCP_MAX_ACTORS` | `200` | Hard limit of actors per bulk write (spawn, scatter, delete...). |
 | `TRIPO_API_KEY` | *(empty)* | Enables the Tripo AI tools ([docs/tripo.md](docs/tripo.md)). Budget: `CONAN_MCP_TRIPO_BUDGET`. |
+| `CONAN_MCP_TRACE_TOLERANCE_CM` | `20` | Max difference between exported landscape heights and line traces before a terrain write is refused. |
 | `CONAN_MCP_EXTRA_PATHS` | *(empty)* | Extra Python paths (separated by `;`) to add at startup. |
 
 Requests carrying a non-loopback `Origin` or `Host` header are rejected (protects against malicious web pages and DNS rebinding), and package paths must live under `/Game`, `/Engine` or `/ConanSandbox`.
@@ -123,7 +124,7 @@ Expected output:
 ```json
 {
   "service": "ConanMCP",
-  "version": "2.2.1",
+  "version": "2.2.2",
   "protocol": "MCP / JSON-RPC 2.0 (2024-11-05)",
   "status": "running",
   "registered_tools": 131,
@@ -270,7 +271,7 @@ graph TD
 
 ## 🧪 Testing & Verification
 
-- `python -m pytest tests` runs 112 tests on any machine, no Unreal needed. They cover:
+- `python -m pytest tests` runs 120 tests on any machine, no Unreal needed. They cover:
   - the JSON-RPC engine and the security policy;
   - the HTTP and SSE transports;
   - the terrain and brush math, the 16-bit PNG codec, scatter and placement rules;

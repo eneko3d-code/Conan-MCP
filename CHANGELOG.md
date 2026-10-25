@@ -1,5 +1,34 @@
 # Changelog
 
+## 2.2.2 — Critical fixes for the render_target landscape backend
+### Fixed (both could corrupt terrain)
+- **Separate landscapes were merged into one grid.** `landscape_guid` is not readable in the DevKit, so every
+  landscape in the level was grouped together. In AlmostEmpty that produced a 497×249 grid with 61,752 zero
+  heights. Grouping now uses `get_landscape_actor()`, so each Landscape or tile is edited on its own; streaming
+  proxies stay with their owner.
+- **The first export of a session can be blank (all 0).** Reads are now validated and rejected when:
+  - every height is 0;
+  - any height is exactly 0;
+  - pixels have alpha 0.
+
+  Invalid reads are re-exported on later editor ticks (up to about 10 s) so the export shader can finish
+  compiling. If no read becomes valid, the tool fails and **nothing is written**.
+
+### Safety
+- An independent check with line traces on up to 5 landscape vertices:
+  - before writing, a mismatch (over `CONAN_MCP_TRACE_TOLERANCE_CM`, 20 cm by default) refuses the write;
+  - after writing, a mismatch restores the backup.
+
+  A bad read can therefore no longer "verify itself" against another bad export.
+- A verification re-read that cannot be validated now reports `verified: "inconclusive"` instead of restoring blindly.
+- `import_heightmap` refuses files that contain zero heights (unless `allow_zero_heights=true`).
+- `restore_heightmap_backup` checks that the backup has the size of the target landscape.
+
+### Other
+- `test_landscape_backend` reports `read_attempts`, `trace_check` and the grouped `members`.
+- 8 new tests (120 in total), including two side-by-side 249×249 landscapes, blank first reads, zero columns,
+  shifted reads and post-write trace mismatches.
+
 ## 2.2.1 — Landscape editing without C++ (render_target backend)
 ### Fixed
 - Landscape tools were unusable in the DevKit. `ConanMCPNative` can never load there: the `.uplugin` has no
