@@ -256,8 +256,14 @@ def _paeth(a, b, c):
     return b if pb <= pc else c
 
 
-def decode_png16(data: bytes) -> HeightGrid:
-    """Decodes 16-bit (or 8-bit, scaled) grayscale PNGs as written by Unreal's Landscape export."""
+_CHANNELS = {0: 1, 2: 3, 4: 2, 6: 4}  # PNG colour type -> channels
+
+
+def decode_png(data: bytes):
+    """Generic non-interlaced PNG decoder: (width, height, channels, depth, unfiltered bytes).
+
+    Supports grayscale, gray+alpha, RGB and RGBA at 8 or 16 bits with every row filter.
+    """
     if data[:8] != b"\x89PNG\r\n\x1a\n":
         raise ValueError("Not a PNG file")
     pos, idat, ihdr = 8, bytearray(), None
@@ -275,36 +281,97 @@ def decode_png16(data: bytes) -> HeightGrid:
     if ihdr is None:
         raise ValueError("PNG has no IHDR chunk")
     width, height, depth, color, _, _, interlace = ihdr
-    if color != 0 or depth not in (8, 16) or interlace != 0:
-        raise ValueError("Heightmap must be a non-interlaced grayscale PNG (8 or 16 bit)")
-    bpp = depth // 8
+    if color not in _CHANNELS or depth not in (8, 16) or interlace != 0:
+        raise ValueError("Unsupported PNG (needs non-interlaced gray/RGB/RGBA, 8 or 16 bit)")
+    channels = _CHANNELS[color]
+    bpp = channels * depth // 8
     stride = width * bpp
     raw = zlib.decompress(bytes(idat))
-    out = array("H")
+    out = bytearray()
     prev = bytearray(stride)
     i = 0
     for _ in range(height):
         ftype = raw[i]
         line = bytearray(raw[i + 1:i + 1 + stride])
         i += 1 + stride
-        for x in range(stride):
-            a = line[x - bpp] if x >= bpp else 0
-            b = prev[x]
-            c = prev[x - bpp] if x >= bpp else 0
-            if ftype == 1:
-                line[x] = (line[x] + a) & 0xFF
-            elif ftype == 2:
-                line[x] = (line[x] + b) & 0xFF
-            elif ftype == 3:
-                line[x] = (line[x] + ((a + b) >> 1)) & 0xFF
-            elif ftype == 4:
-                line[x] = (line[x] + _paeth(a, b, c)) & 0xFF
-        if depth == 16:
-            row = array("H", bytes(line))
-            if struct.pack("=H", 1) == b"\x01\x00":
-                row.byteswap()
-            out.extend(row)
-        else:
-            out.extend(v * 257 for v in line)
+        if ftype:
+            for x in range(stride):
+                a = line[x - bpp] if x >= bpp else 0
+                b = prev[x]
+                if ftype == 1:
+                    line[x] = (line[x] + a) & 0xFF
+                elif ftype == 2:
+                    line[x] = (line[x] + b) & 0xFF
+                elif ftype == 3:
+                    line[x] = (line[x] + ((a + b) >> 1)) & 0xFF
+                elif ftype == 4:
+                    line[x] = (line[x] + _paeth(a, b, prev[x - bpp] if x >= bpp else 0)) & 0xFF
+        out += line
         prev = line
+    return width, height, channels, depth, bytes(out)
+
+
+def decode_png16(data: bytes) -> HeightGrid:
+    """Decodes grayscale PNGs (16-bit as written by Unreal's Landscape export, or 8-bit scaled)."""
+    width, height, channels, depth, raw = decode_png(data)
+    if channels != 1:
+        raise ValueError("Heightmap must be a grayscale PNG (8 or 16 bit)")
+    if depth == 16:
+        out = array("H", raw)
+        if struct.pack("=H", 1) == b"\x01\x00":
+            out.byteswap()
+    else:
+        out = array("H", (v * 257 for v in raw))
     return HeightGrid(width, height, out)
+
+
+def encode_png_rgba8(width: int, height: int, rgba: bytes) -> bytes:
+    """8-bit RGBA PNG (no filter) from raw row-major RGBA bytes."""
+    if len(rgba) != width * height * 4:
+        raise ValueError("RGBA buffer size does not match width*height*4")
+    stride = width * 4
+    raw = bytearray()
+    for y in range(height):
+        raw.append(0)
+        raw += rgba[y * stride:(y + 1) * stride]
+    ihdr = struct.pack(">IIBBBBB", width, height, 8, 6, 0, 0, 0)
+    return b"\x89PNG\r\n\x1a\n" + _chunk(b"IHDR", ihdr) + _chunk(b"IDAT", zlib.compress(bytes(raw), 6)) + _chunk(b"IEND", b"")
+
+
+def pack_rg(grid: HeightGrid) -> bytes:
+    """Unreal's RG heightmap encoding: R = high byte, G = low byte (B = 0, A = 255)."""
+    out = bytearray(len(grid.data) * 4)
+    for i, h in enumerate(grid.data):
+        j = i * 4
+        out[j] = h >> 8
+        out[j + 1] = h & 0xFF
+        out[j + 3] = 255
+    return bytes(out)
+
+
+def unpack_rg(pixels, width: int, height: int, scale=None) -> HeightGrid:
+    """HeightGrid from render-target pixels (objects with .r/.g) in RG encoding.
+
+    ``scale`` is 255 for normalized 0-1 readbacks and 1 for raw 0-255 ones; by default it is detected from
+    the whole buffer (any value above 1 means raw bytes), never per pixel.
+    """
+    if len(pixels) != width * height:
+        raise ValueError(f"Render target returned {len(pixels)} pixels, expected {width * height}")
+    if scale is None:
+        scale = 1.0 if any(float(p.r) > 1.0001 or float(p.g) > 1.0001 for p in pixels) else 255.0
+    data = array("H", [0]) * (width * height)
+    for i, p in enumerate(pixels):
+        hi = min(255, max(0, int(round(float(p.r) * scale))))
+        lo = min(255, max(0, int(round(float(p.g) * scale))))
+        data[i] = (hi << 8) | lo
+    return HeightGrid(width, height, data)
+
+
+def mask_rgba(width: int, height: int, weights) -> bytes:
+    """RGBA bytes whose R channel holds 0-255 weights (for weightmap import)."""
+    out = bytearray(width * height * 4)
+    for i, w in enumerate(weights):
+        j = i * 4
+        out[j] = max(0, min(255, int(w)))
+        out[j + 3] = 255
+    return bytes(out)

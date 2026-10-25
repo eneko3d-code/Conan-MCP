@@ -966,3 +966,142 @@ def _import_asset_tasks(self, tasks):
 
 
 _AssetTools.import_asset_tasks = _import_asset_tasks
+
+
+# ---------------------------------------------------------------------------
+# Render-target landscape APIs (installed per test with install_render_target_apis)
+# ---------------------------------------------------------------------------
+
+from conan_mcp.mapping import heightmap as _hm  # noqa: E402
+
+
+class LinearColor:
+    def __init__(self, r=0.0, g=0.0, b=0.0, a=1.0):
+        self.r, self.g, self.b, self.a = r, g, b, a
+
+
+class Vector2D:
+    def __init__(self, x=0.0, y=0.0):
+        self.x, self.y = x, y
+
+
+class TextureRenderTargetFormat:
+    RTF_RGBA8 = "RTF_RGBA8"
+
+
+class BlendMode:
+    BLEND_OPAQUE = "opaque"
+
+
+class TextureFilter:
+    TF_NEAREST = "nearest"
+
+
+class _RT:
+    def __init__(self, w, h):
+        self.w, self.h = w, h
+        self.bytes = bytearray(w * h * 4)  # RGBA8 storage
+
+
+class _Texture(Object):
+    def __init__(self, w, h, rgba):
+        super().__init__()
+        self.w, self.h, self.rgba = w, h, rgba
+        self._props.update({"srgb": True, "filter": "default"})
+        self.updated = False
+
+    def update_resource(self):
+        self.updated = True
+
+
+def _srgb_to_linear_byte(b):
+    v = b / 255.0
+    lin = v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+    return int(round(lin * 255))
+
+
+class _Canvas:
+    def __init__(self, rt):
+        self.rt = rt
+
+    def draw_texture(self, tex, pos, size, coord_pos, coord_size, color, blend, rotation, pivot):
+        assert (int(size.x), int(size.y)) == (self.rt.w, self.rt.h) == (tex.w, tex.h)
+        srgb = tex.get_editor_property("srgb")
+        data = bytearray(tex.rgba)
+        if srgb:  # what the GPU does when sampling an sRGB texture into a linear target
+            data = bytearray(_srgb_to_linear_byte(b) if i % 4 != 3 else b for i, b in enumerate(data))
+        self.rt.bytes[:] = data
+
+
+class _RenderingLibrary:
+    @staticmethod
+    def create_render_target2d(world, w, h, fmt=None, *a):
+        return _RT(w, h)
+
+    @staticmethod
+    def read_render_target_raw(world, rt, normalize=True):
+        b = rt.bytes
+        return [LinearColor(b[i] / 255.0, b[i + 1] / 255.0, b[i + 2] / 255.0, b[i + 3] / 255.0) for i in range(0, len(b), 4)]
+
+    @staticmethod
+    def import_buffer_as_texture2d(world, buffer):
+        w, h, ch, depth, raw = _hm.decode_png(bytes(buffer))
+        assert ch == 4 and depth == 8
+        return _Texture(w, h, raw)
+
+    @staticmethod
+    def begin_draw_canvas_to_render_target(world, rt):
+        return _Canvas(rt), Vector2D(rt.w, rt.h), object()
+
+    @staticmethod
+    def end_draw_canvas_to_render_target(world, ctx):
+        return None
+
+
+class LandscapeProxy(Actor):
+    """Holds a heightmap; export/import go through render targets like the engine."""
+
+    def init_heights(self, size):
+        self.size = size
+        self.heights = _hm.HeightGrid(size, size, [32768 + ((x * 7 + y * 13) % 900) for y in range(size) for x in range(size)])
+        self.weights = {}
+        self.imports = 0
+
+    def landscape_export_heightmap_to_render_target(self, rt, rg=False, proxies=True):
+        assert rg and (rt.w, rt.h) == (self.size, self.size)
+        rt.bytes[:] = _hm.pack_rg(self.heights)
+        return True
+
+    def landscape_import_heightmap_from_render_target(self, rt, rg=False):
+        assert rg and (rt.w, rt.h) == (self.size, self.size)
+        b = rt.bytes
+        self.heights = _hm.HeightGrid(self.size, self.size, [(b[i] << 8) | b[i + 1] for i in range(0, len(b), 4)])
+        self.imports += 1
+        return True
+
+    def landscape_import_weightmap_from_render_target(self, rt, layer):
+        self.weights[str(layer)] = bytes(rt.bytes[0::4])
+        return True
+
+
+class LandscapeRT(LandscapeProxy):
+    def get_class(self):
+        return _Cls("Landscape")
+
+
+class LandscapeStreamingProxy(LandscapeProxy):
+    pass
+
+
+RT_APIS = {"LandscapeProxy": LandscapeProxy, "RenderingLibrary": _RenderingLibrary, "LinearColor": LinearColor,
+           "Vector2D": Vector2D, "TextureRenderTargetFormat": TextureRenderTargetFormat, "BlendMode": BlendMode,
+           "TextureFilter": TextureFilter, "LandscapeStreamingProxy": LandscapeStreamingProxy}
+
+
+def make_rt_landscape(cls=None, size=65, label="Landscape"):
+    """Landscape whose bounds cover size x size vertices at 100 cm, min corner at world (0, 0)."""
+    half = (size - 1) * 50.0
+    land = (cls or LandscapeRT)(label, (half, half, 0.0), extent=((size - 1) / 2.0, (size - 1) / 2.0, 10.0))
+    land.set_actor_scale3d(Vector(100, 100, 100))
+    land.init_heights(size)
+    return ENGINE.add_actor(land)

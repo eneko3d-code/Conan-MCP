@@ -1,18 +1,30 @@
 ---
 name: conan-landscape-sculpting
-description: Sculpt and paint Conan Exiles DevKit landscapes with ConanMCP brushes (raise, lower, flatten, smooth, noise, ramp, layer paint) safely, natively or through a heightmap PNG. Use for any terrain edit request.
+description: Sculpt and paint Conan Exiles DevKit landscapes with ConanMCP brushes (raise, lower, flatten, smooth, noise, ramp, layer paint) safely, live through render targets (with backups and verification) or through a heightmap PNG. Use for any terrain edit request.
 ---
 
 # Landscape sculpting with ConanMCP
 
 ## Pick the backend
-Call `get_landscape_info`:
-- `editing_backend: native`: `sculpt_terrain` / `paint_landscape_layer` edit the landscape directly inside an undoable transaction.
-- `editing_backend: heightmap_file`: ask the user to export the heightmap once:
-  Landscape mode → Manage → Export → Heightmap (16-bit PNG) into the folder reported as `heightmap_folder`.
-  Then pass `heightmap_file: "<name>.png"` (and `output_file` to keep the original). Chain all strokes on
-  the same file, then the user re-imports it (Landscape mode → Import → Heightmap, same resolution).
-  Painting layers requires the native module.
+Call `get_landscape_info` and read `editing_backend`:
+- `render_target` (the usual one in the Conan DevKit, pure Python):
+  - `sculpt_terrain`, `export_heightmap` and `import_heightmap` edit the landscape live;
+  - every write first saves a full PNG backup (`list_heightmap_backups`), then re-exports and checks every height;
+  - if the result is not exact, it restores the backup automatically and reports an error.
+- `native`: only if the optional C++ module is loaded. The Conan DevKit cannot compile it.
+- `heightmap_file`: last resort. Export the heightmap once from Landscape mode (Manage → Export → Heightmap,
+  16-bit PNG) into `heightmap_folder`, pass `heightmap_file: "<name>.png"`, then re-import it by hand.
+
+**First time on a level, or after a DevKit update:** run `test_landscape_backend write_test=true` on a test
+level (for example `/Game/Dev/AlmostEmpty`). Continue only if `result: ok` and `altered_heights: 0`.
+Note `read_s`, which tells you how long each stroke will take.
+
+**Undo:** `undo` (Ctrl+Z) may revert an import. The guaranteed way back is `restore_heightmap_backup` with
+the `backup` file named in each stroke's result.
+
+**Painting layers without the native module:** `paint_landscape_layer` can only **replace a whole layer**,
+because the current weights cannot be read. Use `replace_layer: true` only for a new or empty layer, or to repaint a
+layer completely, and tell the user before doing it.
 
 ## Units and coordinates
 - `center`, `end`, `radius`, `amount`, `target_z`, `noise_scale` are **world centimetres**.

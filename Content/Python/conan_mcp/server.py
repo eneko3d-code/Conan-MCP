@@ -21,7 +21,7 @@ TOOL_MODULES = (
 _RELOAD_ORDER = (
     "core.config", "core.ue", "core.sse", "core.log", "core.security", "core.results", "core.registry",
     "core.dispatcher", "core.protocol", "core.transport",
-    "mapping.heightmap", "mapping.terrain", "mapping.placement", "mapping.classify",
+    "mapping.heightmap", "mapping.terrain", "tools.landscape_rt", "mapping.placement", "mapping.classify",
     "animation.roles", "animation.pose", "animation.timing", "integrations.tripo",
 ) + tuple(f"tools.{m}" for m in TOOL_MODULES) + ("prompts",)
 
